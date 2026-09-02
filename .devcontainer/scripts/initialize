@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEVCONTAINER_DATA_ON_HOST="${HOME}/.devcontainers/$(basename "${PWD}")"
+mkdir -p "${DEVCONTAINER_DATA_ON_HOST}"
+touch "${DEVCONTAINER_DATA_ON_HOST}/.bash_history"
+
+[ -d "${HOME}/.ssh" ] || mkdir -m 700 "${HOME}/.ssh"
