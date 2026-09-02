@@ -1,0 +1,68 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "STM32: build (anchor)",
+      "type": "shell",
+      "command": "cmake --preset Debug && cmake --build --preset Debug",
+      "options": {
+        "cwd": "${workspaceFolder}/anchor"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "STM32: clean build directory (anchor)",
+      "type": "shell",
+      "command": "rm -rf build",
+      "options": {
+        "cwd": "${workspaceFolder}/anchor"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "STM32: kill stray debug processes (anchor)",
+      "type": "shell",
+      "command": "pkill -f st-util; pkill -f gdb-multiarch; true",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "clear": false
+      }
+    },
+    {
+      "label": "STM32: flash (anchor)",
+      "type": "shell",
+      "command": "arm-none-eabi-objcopy -O binary build/Debug/anchor.elf build/Debug/anchor.bin && st-flash write build/Debug/anchor.bin 0x08000000 && st-flash reset",
+      "options": {
+        "cwd": "${workspaceFolder}/anchor"
+      },
+      "dependsOn": [
+        "STM32: build (anchor)"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    }
+  ]
+}

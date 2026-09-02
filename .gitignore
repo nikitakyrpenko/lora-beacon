@@ -67,3 +67,22 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# STM32 firmware build outputs (in case anything writes outside build/)
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+
+# host/ Python tooling
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# OS metadata
+.DS_Store
+Thumbs.db

@@ -1,0 +1,35 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug anchor : STM32L476 (st-util)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/anchor/build/Debug/anchor.elf",
+      "cwd": "${workspaceFolder}/anchor",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb-multiarch",
+      "targetArchitecture": "arm",
+      "debugServerPath": "/usr/bin/st-util",
+      "debugServerArgs": "--connect-under-reset -F 480k",
+      "serverStarted": "Listening at",
+      "filterStderr": true,
+      "externalConsole": false,
+      "preLaunchTask": "STM32: build (anchor)",
+      "postDebugTask": "STM32: kill stray debug processes (anchor)",
+      "customLaunchSetupCommands": [
+        { "text": "file ${workspaceFolder}/anchor/build/Debug/anchor.elf" },
+        { "text": "target remote localhost:4242" },
+        { "text": "monitor reset halt" },
+        { "text": "load" }
+      ],
+      "launchCompleteCommand": "exec-continue",
+      "setupCommands": [
+        {
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    }
+  ]
+}
