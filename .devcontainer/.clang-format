@@ -28,7 +28,7 @@ BinPackParameters: false
 BraceWrapping:
   AfterCaseLabel: false
   AfterClass: false
-  AfterControlStatement: Never
+  AfterControlStatement: Always
   AfterEnum: false
   AfterFunction: false
   AfterNamespace: false
@@ -144,7 +144,7 @@ RawStringFormats:
       - ParsePartialTestProto
     CanonicalDelimiter: ""
     BasedOnStyle: google
-ReflowComments: true
+ReflowComments: false
 SortIncludes: false
 SortUsingDeclarations: true
 SpaceAfterCStyleCast: false

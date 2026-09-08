@@ -55,6 +55,10 @@
           "editor.formatOnSave": true,
           "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
         },
+        "[c]": {
+          "editor.formatOnSave": true,
+          "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+        },
         "terminal.integrated.defaultProfile.linux": "bash (container default)",
         "terminal.integrated.profiles.linux": {
           "bash (container default)": {
