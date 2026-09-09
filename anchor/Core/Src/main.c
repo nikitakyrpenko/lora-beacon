@@ -49,6 +49,8 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 
+volatile uint8_t DIO1_Callback_detected = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -98,7 +100,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   SX1280_Create(&hspi3, BUSY_GPIO_Port, NSS_GPIO_Port, NRESET_GPIO_Port, TCXOEN_GPIO_Port, BUSY_Pin, NSS_Pin, NRESET_Pin, TCXOEN_Pin);
-  SX1280_Init();
+  SX1280_Radio_mode();
   /* USER CODE END 2 */
 
   /* Initialize leds */
@@ -111,6 +113,11 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1) {
     /* USER CODE END WHILE */
+    if (DIO1_Callback_detected) {
+      if (SX1280_Check_Wake_Word_Matches()) {
+      }
+      DIO1_Callback_detected = 0;
+    }
 
     /* USER CODE BEGIN 3 */
   }
@@ -288,9 +295,13 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : DIO1_Pin */
   GPIO_InitStruct.Pin = DIO1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(DIO1_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -304,6 +315,13 @@ int __io_putchar(int ch)
   uint8_t c = (uint8_t)ch;
   HAL_UART_Transmit(&huart2, &c, 1, HAL_MAX_DELAY);
   return ch;
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == DIO1_Pin) {
+    DIO1_Callback_detected = 1;
+  }
 }
 
 /* USER CODE END 4 */

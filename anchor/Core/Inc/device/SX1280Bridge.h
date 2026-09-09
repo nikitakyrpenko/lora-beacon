@@ -18,7 +18,9 @@ void SX1280_Create(SPI_HandleTypeDef* SPI_port,
                    uint16_t NRESET_pin,
                    uint16_t TCXOEN_pin);
 
-uint16_t SX1280_Init();
+uint16_t SX1280_Radio_mode();
+uint16_t SX1280_Check_Wake_Word_Matches();
+uint16_t SX1280_Ranging_Slave_Mode();
 
 #ifdef __cplusplus
 }

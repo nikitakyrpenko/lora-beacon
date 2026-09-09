@@ -79,6 +79,7 @@ void Error_Handler(void);
 #define TCXOEN_GPIO_Port GPIOB
 #define DIO1_Pin GPIO_PIN_9
 #define DIO1_GPIO_Port GPIOB
+#define DIO1_EXTI_IRQn EXTI9_5_IRQn
 
 /* USER CODE BEGIN Private defines */
 

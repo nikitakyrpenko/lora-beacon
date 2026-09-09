@@ -16,6 +16,8 @@ static constexpr uint8_t READ_REGISTER_OP_CODE = 0x19;
 static constexpr uint8_t WRITE_BUFFER_OP_CODE = 0x1A;
 static constexpr uint8_t READ_BUFFER_OP_CODE = 0x1B;
 
+static constexpr uint8_t READ_BUFFER_STATUS_OP_CODE = 0x17;
+
 static constexpr uint8_t CLEAR_IRQ_STATUS_OP_CODE = 0x97;
 static constexpr uint8_t GET_IRQ_STATUS_OP_CODE = 0x15;
 
@@ -122,3 +124,9 @@ static constexpr uint8_t RANGING_RESULT_FILTERED = 0x03;
 static constexpr int32_t RANGING_RESULT_TO_CM_MULTIPLIER = 20;
 
 }  // namespace SX1280_VALUES
+
+// Application-level protocol constants -- not SX1280 hardware facts, kept separate from the datasheet-sourced
+// namespaces above. Shared verbatim between anchor and rover (once rover exists).
+namespace LORA_BEACON_PROTOCOL {
+static constexpr uint8_t WAKE_WORD[2] = {0xBE, 0xAC};
+}  // namespace LORA_BEACON_PROTOCOL
