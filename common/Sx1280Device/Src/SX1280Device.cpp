@@ -2,6 +2,8 @@
 
 #include "SX1280Device.hpp"
 #include "stm32l4xx_hal.h"
+#include "stm32l4xx_hal_def.h"
+#include "stm32l4xx_hal_spi.h"
 
 #ifdef DEBUG_PINS
 #include <cstdio>
@@ -135,6 +137,43 @@ HAL_StatusTypeDef SX1280Device::SPI_write(const uint8_t* reg, const uint8_t* buf
   HAL_StatusTypeDef result = HAL_SPI_TransmitReceive(SPI_port, tx, rx, len + 1, SPI_TIMEOUT);
   if (result == HAL_OK) {
     *out = to_status(rx[1]);
+  }
+
+  if (!NSS_end()) {
+    return HAL_ERROR;
+  }
+
+  return result;
+}
+
+HAL_StatusTypeDef SX1280Device::SPI_read(
+  const uint8_t* reg, const uint16_t* addr, uint8_t* buf, uint16_t len, SX1280Device::SX1280_Status* out)
+{
+  if (len > SPI_PACKET_SIZE) {
+    return HAL_ERROR;
+  }
+
+  if (!BUSY_wait(BUSY_TIMEOUT)) {
+    return HAL_TIMEOUT;
+  }
+
+  if (!NSS_begin()) {
+    return HAL_ERROR;
+  }
+
+  uint8_t addr_msb = static_cast<uint8_t>(*addr >> 8);
+  uint8_t addr_lsb = static_cast<uint8_t>(*addr & 0xFF);
+
+  // opcode, addrMSB, addrLSB, NOP (status returned here), then len data bytes
+  uint8_t tx[SPI_PACKET_SIZE + 4] = {*reg, addr_msb, addr_lsb};
+  uint8_t rx[SPI_PACKET_SIZE + 4] = {};
+
+  HAL_StatusTypeDef result = HAL_SPI_TransmitReceive(SPI_port, tx, rx, len + 4, SPI_TIMEOUT);
+  if (result == HAL_OK) {
+    *out = to_status(rx[3]);
+    for (uint16_t i = 0; i < len; ++i) {
+      buf[i] = rx[i + 4];
+    }
   }
 
   if (!NSS_end()) {

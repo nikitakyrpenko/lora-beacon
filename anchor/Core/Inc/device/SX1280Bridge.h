@@ -1,6 +1,7 @@
 #ifndef SX1280_BRIDGE_H
 #define SX1280_BRIDGE_H
 
+#include <stdint.h>
 #include "stm32l4xx_hal.h"
 
 #ifdef __cplusplus
@@ -17,7 +18,7 @@ void SX1280_Create(SPI_HandleTypeDef* SPI_port,
                    uint16_t NRESET_pin,
                    uint16_t TCXOEN_pin);
 
-void SX1280_Init();
+uint16_t SX1280_Init();
 
 #ifdef __cplusplus
 }

@@ -1,4 +1,5 @@
 
+#include <cstdint>
 #include "stm32l4xx_hal.h"
 
 static constexpr uint8_t BUSY_TIMEOUT = 10;  // 10 ms BUSY timeout
@@ -59,7 +60,7 @@ public:
 
   bool NRESET_reset();
   HAL_StatusTypeDef SPI_write(const uint8_t* reg, const uint8_t* buf, const uint16_t len, SX1280_Status* out);
-  HAL_StatusTypeDef SPI_read(const uint8_t* reg, uint8_t* buf, uint16_t len, SX1280_Status* out);
+  HAL_StatusTypeDef SPI_read(const uint8_t* reg, const uint16_t* addr, uint8_t* buf, uint16_t len, SX1280_Status* out);
 
 private:
   SPI_HandleTypeDef* SPI_port;
