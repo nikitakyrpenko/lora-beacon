@@ -30,6 +30,36 @@
           "ignoreFailures": true
         }
       ]
+    },
+    {
+      "name": "Debug beacon : STM32L476 (st-util)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/beacon/build/Debug/beacon.elf",
+      "cwd": "${workspaceFolder}/beacon",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb-multiarch",
+      "targetArchitecture": "arm",
+      "debugServerPath": "/usr/bin/st-util",
+      "debugServerArgs": "--connect-under-reset -F 480k -p 4243",
+      "serverStarted": "Listening at",
+      "filterStderr": true,
+      "externalConsole": false,
+      "preLaunchTask": "STM32: build (beacon)",
+      "postDebugTask": "STM32: kill stray debug processes (beacon)",
+      "customLaunchSetupCommands": [
+        { "text": "file ${workspaceFolder}/beacon/build/Debug/beacon.elf" },
+        { "text": "target remote localhost:4243" },
+        { "text": "monitor reset halt" },
+        { "text": "load" }
+      ],
+      "launchCompleteCommand": "exec-continue",
+      "setupCommands": [
+        {
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
     }
   ]
 }

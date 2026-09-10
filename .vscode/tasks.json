@@ -63,6 +63,66 @@
         "panel": "dedicated",
         "clear": true
       }
+    },
+    {
+      "label": "STM32: build (beacon)",
+      "type": "shell",
+      "command": "cmake --preset Debug && cmake --build --preset Debug",
+      "options": {
+        "cwd": "${workspaceFolder}/beacon"
+      },
+      "group": "build",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "STM32: clean build directory (beacon)",
+      "type": "shell",
+      "command": "rm -rf build",
+      "options": {
+        "cwd": "${workspaceFolder}/beacon"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "STM32: kill stray debug processes (beacon)",
+      "type": "shell",
+      "command": "pkill -f st-util; pkill -f gdb-multiarch; true",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "clear": false
+      }
+    },
+    {
+      "label": "STM32: flash (beacon)",
+      "type": "shell",
+      "command": "arm-none-eabi-objcopy -O binary build/Debug/beacon.elf build/Debug/beacon.bin && st-flash write build/Debug/beacon.bin 0x08000000 && st-flash reset",
+      "options": {
+        "cwd": "${workspaceFolder}/beacon"
+      },
+      "dependsOn": [
+        "STM32: build (beacon)"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
     }
   ]
 }
