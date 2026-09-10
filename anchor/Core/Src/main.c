@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <stdint.h>
 #include "SX1280Bridge.h"
+#include "cmsis_gcc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -115,9 +116,11 @@ int main(void)
     /* USER CODE END WHILE */
     if (DIO1_Callback_detected) {
       if (SX1280_Check_Wake_Word_Matches()) {
+        SX1280_Ranging_Slave_Mode();
       }
       DIO1_Callback_detected = 0;
     }
+    __WFI();
 
     /* USER CODE BEGIN 3 */
   }

@@ -123,6 +123,21 @@ static constexpr uint8_t RANGING_RESULT_FILTERED = 0x03;
 // Distance[m] = RangingResult * 150 / (2^12 * BW_MHz); not covered here since Raw isn't used by this project.
 static constexpr int32_t RANGING_RESULT_TO_CM_MULTIPLIER = 20;
 
+// Grouped multi-byte param sets, reused verbatim as a single SPI_write `tx` payload across radio modes -- both
+// the LoRa idle-sniff mode and the Ranging-armed mode use the same carrier frequency, same SF7/BW/CR modulation
+// (Table 13-55 lists SF7 as ranging-legal), and the same SF7 register fixup (a modulation-block quirk, not
+// packet-type-specific -- applies to both).
+static constexpr uint8_t RF_FREQUENCY_BYTES[3] = {FREQUENCY_MSB, FREQUENCY_MID, FREQUENCY_LSB};
+static constexpr uint8_t MODULATION_PARAMS_SF7[3] = {SPREADING_FACTOR_SF_7, BANDWITH_BW_1600, CHIP_RATE_CR_4_5};
+static constexpr uint8_t SF_7_FIXUP_WRITE[3] = {
+  static_cast<uint8_t>(REG_SF_MODULATION_FIXUP >> 8), static_cast<uint8_t>(REG_SF_MODULATION_FIXUP & 0xFF), SF_7_REGISTER_FIXUP};
+// txBaseAddress=0x00, rxBaseAddress=0x00 -- not packet-type-dependent, so this also carries over unchanged
+// into Ranging mode.
+static constexpr uint8_t BUFFER_BASE_ADDRESS[2] = {0x00, 0x00};
+
+// SetLongPreamble param (opcode SET_LONG_PREAMBLE_OP_CODE, 0x9B)
+static constexpr uint8_t LONG_PREAMBLE_ENABLE = 0x01;
+
 }  // namespace SX1280_VALUES
 
 // Application-level protocol constants -- not SX1280 hardware facts, kept separate from the datasheet-sourced

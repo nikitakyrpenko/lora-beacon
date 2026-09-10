@@ -1,3 +1,4 @@
+#include <cstddef>
 #include <stdint.h>
 
 #include "stm32l4xx_hal.h"
@@ -50,119 +51,128 @@ static bool step_ok(HAL_StatusTypeDef hal, const SX1280Device::SX1280_Status& st
                            sta.command_status == SX1280Device::CommandStatus::RESERVED);
 }
 
-extern "C" uint16_t SX1280_Radio_mode()
-{
-  uint16_t mask = 0x0;
+struct Sx1280Step {
+  const char* name;
+  const uint8_t* op_code;
+  const uint8_t* tx;
+  uint16_t len;
+};
 
+static uint16_t execute_step(const Sx1280Step* steps, size_t count)
+{
   if (LoRa_SX1280 == nullptr) {
-    return mask;
+    return 0;
   }
 
+  uint16_t mask = 0;
   SX1280Device::SX1280_Status sta{};
 
-  HAL_StatusTypeDef hal = LoRa_SX1280->SPI_write(
-    &SX1280_OPERATIONS::SET_STANDBY_OP_CODE, &SX1280_VALUES::STDBY_RC_STAND_BY, nullptr, static_cast<uint16_t>(1), &sta);
-  DEBUG_STEP("SetStandby", hal, sta);
-  if (!step_ok(hal, sta)) {
-    return mask;
+  for (size_t i = 0; i < count; ++i) {
+    HAL_StatusTypeDef hal = LoRa_SX1280->SPI_write(steps[i].op_code, steps[i].tx, nullptr, steps[i].len, &sta);
+    DEBUG_STEP(steps[i].name, hal, sta);
+    if (!step_ok(hal, sta)) {
+      return mask;
+    }
+    mask |= static_cast<uint16_t>(1u << i);
   }
-  mask |= 0b1;
-
-  hal = LoRa_SX1280->SPI_write(
-    &SX1280_OPERATIONS::SET_PACKET_TYPE_OP_CODE, &SX1280_VALUES::PACKET_TYPE_LORA, nullptr, static_cast<uint16_t>(1), &sta);
-  DEBUG_STEP("SetPacketType", hal, sta);
-  if (!step_ok(hal, sta)) {
-    return mask;
-  }
-  mask |= 0b10;
-
-  uint8_t FREQ[3] = {SX1280_VALUES::FREQUENCY_MSB, SX1280_VALUES::FREQUENCY_MID, SX1280_VALUES::FREQUENCY_LSB};
-  hal = LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::SET_FREQUENCY_OP_CODE, FREQ, nullptr, static_cast<uint16_t>(3), &sta);
-  DEBUG_STEP("SetRfFrequency", hal, sta);
-  if (!step_ok(hal, sta)) {
-    return mask;
-  }
-  mask |= 0b100;
-
-  uint8_t BASE_ADDRESS[2] = {0x00, 0x00};
-  hal = LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::SET_BUFFER_BASE_ADDRESS_OP_CODE, BASE_ADDRESS, nullptr, static_cast<uint16_t>(2), &sta);
-  DEBUG_STEP("SetBufferBaseAddress", hal, sta);
-  if (!step_ok(hal, sta)) {
-    return mask;
-  }
-  mask |= 0b1000;
-
-  uint8_t MODULATION_PARAMS[3] = {SX1280_VALUES::SPREADING_FACTOR_SF_7, SX1280_VALUES::BANDWITH_BW_1600, SX1280_VALUES::CHIP_RATE_CR_4_5};
-  hal = LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::SET_MODULATION_OP_CODE, MODULATION_PARAMS, nullptr, static_cast<uint16_t>(3), &sta);
-  DEBUG_STEP("SetModulationParams", hal, sta);
-  if (!step_ok(hal, sta)) {
-    return mask;
-  }
-  mask |= 0b10000;
-
-  uint8_t SF_7_FIXUP[3] = {static_cast<uint8_t>(SX1280_VALUES::REG_SF_MODULATION_FIXUP >> 8),  // 0x09
-                           static_cast<uint8_t>(SX1280_VALUES::REG_SF_MODULATION_FIXUP & 0xFF),
-                           SX1280_VALUES::SF_7_REGISTER_FIXUP};
-  hal = LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SF_7_FIXUP, nullptr, static_cast<uint16_t>(3), &sta);
-  DEBUG_STEP("SF7RegisterFixup", hal, sta);
-  if (!step_ok(hal, sta)) {
-    return mask;
-  }
-  mask |= 0b100000;
-
-  uint8_t PACKET_PARAMS[7] = {SX1280_VALUES::LORA_PREAMBLE_12_SYMBOLS,
-                              SX1280_VALUES::EXPLICIT_HEADER,
-                              0x02,
-                              SX1280_VALUES::LORA_CRC_ENABLE,
-                              SX1280_VALUES::LORA_IQ_STD,
-                              0x00,
-                              0x00};
-  hal = LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE, PACKET_PARAMS, nullptr, static_cast<uint16_t>(7), &sta);
-  DEBUG_STEP("SetPacketParams", hal, sta);
-  if (!step_ok(hal, sta)) {
-    return mask;
-  }
-  mask |= 0b1000000;
-
-  uint8_t IRQ_PARAMS[8] = {static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_RX_DONE >> 8),
-                           static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_RX_DONE),
-                           static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_RX_DONE >> 8),
-                           static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_RX_DONE),
-                           0x0,
-                           0x0,
-                           0x0,
-                           0x0};
-  hal = LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, IRQ_PARAMS, nullptr, static_cast<uint16_t>(8), &sta);
-  DEBUG_STEP("SetDioIrqParams", hal, sta);
-  if (!step_ok(hal, sta)) {
-    return mask;
-  }
-  mask |= 0b10000000;
-
-  uint8_t PREAMBLE[1] = {0x1};
-  hal = LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::SET_LONG_PREAMBLE_OP_CODE, PREAMBLE, nullptr, static_cast<uint16_t>(1), &sta);
-  DEBUG_STEP("SetLongPreamble", hal, sta);
-  if (!step_ok(hal, sta)) {
-    return mask;
-  }
-  mask |= 0b100000000;
-
-  uint8_t DUTY_CYCLE_PARAMS[5] = {SX1280_VALUES::PERIOD_BASE_1_MS,
-                                  static_cast<uint8_t>(SX1280_VALUES::ANCHOR_IDLE_RX_PERIOD_BASE_COUNT >> 8),
-                                  static_cast<uint8_t>(SX1280_VALUES::ANCHOR_IDLE_RX_PERIOD_BASE_COUNT),
-                                  static_cast<uint8_t>(SX1280_VALUES::ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT >> 8),
-                                  static_cast<uint8_t>(SX1280_VALUES::ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT)};
-  hal = LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::SET_RX_DUTY_CYCLE_OP_CODE, DUTY_CYCLE_PARAMS, nullptr, static_cast<uint16_t>(5), &sta);
-  DEBUG_STEP("SetRxDutyCycle", hal, sta);
-  if (!step_ok(hal, sta)) {
-    return mask;
-  }
-  mask |= 0b1000000000;
 
   return mask;
 }
 
-extern "C" uint16_t SX1280_Ranging_Slave_Mode() {}
+extern "C" uint16_t SX1280_Radio_mode()
+{
+  uint8_t packet[7] = {SX1280_VALUES::LORA_PREAMBLE_12_SYMBOLS,
+                       SX1280_VALUES::EXPLICIT_HEADER,
+                       0x02,
+                       SX1280_VALUES::LORA_CRC_ENABLE,
+                       SX1280_VALUES::LORA_IQ_STD,
+                       0x00,
+                       0x00};
+  uint8_t irq_mask[8] = {static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_RX_DONE >> 8),
+                         static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_RX_DONE),
+                         static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_RX_DONE >> 8),
+                         static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_RX_DONE),
+                         0x0,
+                         0x0,
+                         0x0,
+                         0x0};
+  uint8_t rx_duty[5] = {SX1280_VALUES::PERIOD_BASE_1_MS,
+                        static_cast<uint8_t>(SX1280_VALUES::ANCHOR_IDLE_RX_PERIOD_BASE_COUNT >> 8),
+                        static_cast<uint8_t>(SX1280_VALUES::ANCHOR_IDLE_RX_PERIOD_BASE_COUNT),
+                        static_cast<uint8_t>(SX1280_VALUES::ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT >> 8),
+                        static_cast<uint8_t>(SX1280_VALUES::ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT)};
+
+  const Sx1280Step radio_steps[] = {
+    {"SetStandby", &SX1280_OPERATIONS::SET_STANDBY_OP_CODE, &SX1280_VALUES::STDBY_RC_STAND_BY, 1},
+    {"SetPacketType", &SX1280_OPERATIONS::SET_PACKET_TYPE_OP_CODE, &SX1280_VALUES::PACKET_TYPE_LORA, 1},
+    {"SetRfFrequency", &SX1280_OPERATIONS::SET_FREQUENCY_OP_CODE, SX1280_VALUES::RF_FREQUENCY_BYTES, 3},
+    {"SetBufferBaseAddress", &SX1280_OPERATIONS::SET_BUFFER_BASE_ADDRESS_OP_CODE, SX1280_VALUES::BUFFER_BASE_ADDRESS, 2},
+    {"SetModulationParams", &SX1280_OPERATIONS::SET_MODULATION_OP_CODE, SX1280_VALUES::MODULATION_PARAMS_SF7, 3},
+    {"SF7RegisterFixup", &SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::SF_7_FIXUP_WRITE, 3},
+    {"SetPacketParams", &SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE, packet, 7},
+    {"SetDioIrqParams", &SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, irq_mask, 8},
+    {"SetLongPreamble", &SX1280_OPERATIONS::SET_LONG_PREAMBLE_OP_CODE, &SX1280_VALUES::LONG_PREAMBLE_ENABLE, 1},
+    {"SetRxDutyCycle", &SX1280_OPERATIONS::SET_RX_DUTY_CYCLE_OP_CODE, rx_duty, 5},
+  };
+
+  return execute_step(radio_steps, sizeof(radio_steps) / sizeof(radio_steps[0]));
+}
+
+extern "C" uint16_t SX1280_Ranging_Slave_Mode()
+{
+  // TODO: must be unique per physical anchor board, drawn from the shared discovery block (e.g. 0xA19-0xA30) --
+  // change this before flashing each board. 0xA19 here is just the block's first address, not a real deployment value.
+  static constexpr uint32_t anchor_ranging_address = 0x00000A19;
+
+  uint8_t packet[7] = {SX1280_VALUES::LORA_PREAMBLE_12_SYMBOLS,
+                       SX1280_VALUES::EXPLICIT_HEADER,
+                       0x02,
+                       SX1280_VALUES::LORA_CRC_DISABLE,
+                       SX1280_VALUES::LORA_IQ_STD,
+                       0x00,
+                       0x00};
+
+  uint8_t own_address[6] = {static_cast<uint8_t>(SX1280_VALUES::REG_RANGING_SLAVE_OWN_ADDR >> 8),
+                            static_cast<uint8_t>(SX1280_VALUES::REG_RANGING_SLAVE_OWN_ADDR & 0xFF),
+                            static_cast<uint8_t>(anchor_ranging_address >> 24),
+                            static_cast<uint8_t>(anchor_ranging_address >> 16),
+                            static_cast<uint8_t>(anchor_ranging_address >> 8),
+                            static_cast<uint8_t>(anchor_ranging_address & 0xFF)};
+
+  uint8_t addr_check_len[3] = {static_cast<uint8_t>(SX1280_VALUES::REG_RANGING_ADDR_CHECK_LEN >> 8),
+                               static_cast<uint8_t>(SX1280_VALUES::REG_RANGING_ADDR_CHECK_LEN & 0xFF),
+                               0x00};  // bits[7:6] = 0x0 -> 8-bit check, sufficient since the discovery block only varies in the low byte
+
+  uint8_t role[1] = {0x00};  // 0x00 = Slave (SET_RANGING_ROLE_OP_CODE)
+
+  constexpr uint16_t ranging_irq_bits =
+    SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE | SX1280_VALUES::IRQ_BIT_RANGING_MASTER_REQUEST_VALID;
+  uint8_t irq_mask[8] = {static_cast<uint8_t>(ranging_irq_bits >> 8),
+                         static_cast<uint8_t>(ranging_irq_bits),
+                         static_cast<uint8_t>(ranging_irq_bits >> 8),
+                         static_cast<uint8_t>(ranging_irq_bits),
+                         0x0,
+                         0x0,
+                         0x0,
+                         0x0};
+
+  uint8_t rx[3] = {SX1280_VALUES::PERIOD_BASE_1_MS, 0x00, 0x00};  // count=0x0000 -> listen indefinitely
+
+  const Sx1280Step ranging_steps[] = {
+    {"SetPacketType", &SX1280_OPERATIONS::SET_PACKET_TYPE_OP_CODE, &SX1280_VALUES::PACKET_TYPE_RANGING, 1},
+    {"SetRfFrequency", &SX1280_OPERATIONS::SET_FREQUENCY_OP_CODE, SX1280_VALUES::RF_FREQUENCY_BYTES, 3},
+    {"SetModulationParams", &SX1280_OPERATIONS::SET_MODULATION_OP_CODE, SX1280_VALUES::MODULATION_PARAMS_SF7, 3},
+    {"SF7RegisterFixup", &SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::SF_7_FIXUP_WRITE, 3},
+    {"SetPacketParams", &SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE, packet, 7},
+    {"OwnRangingAddress", &SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, own_address, 6},
+    {"RangingAddrCheckLen", &SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, addr_check_len, 3},
+    {"SetRangingRole", &SX1280_OPERATIONS::SET_RANGING_ROLE_OP_CODE, role, 1},
+    {"SetDioIrqParams", &SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, irq_mask, 8},
+    {"SetRx", &SX1280_OPERATIONS::SET_RX_OP_CODE, rx, 3},
+  };
+
+  return execute_step(ranging_steps, sizeof(ranging_steps) / sizeof(ranging_steps[0]));
+}
 
 extern "C" uint16_t SX1280_Check_Wake_Word_Matches()
 {
