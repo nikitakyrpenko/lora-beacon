@@ -123,6 +123,48 @@
         "panel": "dedicated",
         "clear": true
       }
+    },
+    {
+      "label": "STM32: build (anchor-blackpill)",
+      "type": "shell",
+      "command": "cmake --preset Debug && cmake --build --preset Debug",
+      "options": {
+        "cwd": "${workspaceFolder}/anchor-blackpill"
+      },
+      "group": "build",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "STM32: clean build directory (anchor-blackpill)",
+      "type": "shell",
+      "command": "rm -rf build",
+      "options": {
+        "cwd": "${workspaceFolder}/anchor-blackpill"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "STM32: kill stray debug processes (anchor-blackpill)",
+      "type": "shell",
+      "command": "pkill -f st-util; pkill -f gdb-multiarch; true",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "clear": false
+      }
     }
   ]
 }

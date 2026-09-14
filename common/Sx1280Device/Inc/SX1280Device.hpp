@@ -1,6 +1,13 @@
 
 #include <cstdint>
+
+#if defined(STM32L476xx)
 #include "stm32l4xx_hal.h"
+#elif defined(STM32H523xx) || defined(STM32H533xx)
+#include "stm32h5xx_hal.h"
+#else
+#error "SX1280Device.hpp: add the HAL umbrella include for this STM32 family"
+#endif
 
 static constexpr uint8_t BUSY_TIMEOUT = 10;  // 10 ms BUSY timeout
 static constexpr uint8_t SPI_TIMEOUT = 10;   // 10 ms SPI timeout

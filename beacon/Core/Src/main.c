@@ -102,6 +102,9 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
+  SX1280_Create(&hspi3, BUSY_GPIO_Port, NSS_GPIO_Port, NRESET_GPIO_Port, TCXOEN_GPIO_Port, BUSY_Pin, NSS_Pin, NRESET_Pin, TCXOEN_Pin);
+  SX1280_Beacon_Radio();
+  SX1280_Send_Wake_Broadcast();
   /* USER CODE END 2 */
 
   /* Initialize leds */

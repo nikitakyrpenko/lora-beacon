@@ -144,4 +144,8 @@ static constexpr uint8_t LONG_PREAMBLE_ENABLE = 0x01;
 // namespaces above. Shared verbatim between anchor and rover (once rover exists).
 namespace LORA_BEACON_PROTOCOL {
 static constexpr uint8_t WAKE_WORD[2] = {0xBE, 0xAC};
+// Fixed, shared compile-time constant for initial anchor+rover bring-up -- first-pass value, NOT
+// hardware-validated yet. Planned to become a rover-supplied runtime value (carried in the wake payload)
+// once basic wake/range exchanges are confirmed working -- see PLAN.md Open Items.
+static constexpr uint32_t RANGING_WINDOW_MS = 2000;
 }  // namespace LORA_BEACON_PROTOCOL

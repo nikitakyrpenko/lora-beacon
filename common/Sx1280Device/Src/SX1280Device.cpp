@@ -1,9 +1,6 @@
 #include <cstdint>
 
 #include "SX1280Device.hpp"
-#include "stm32l4xx_hal.h"
-#include "stm32l4xx_hal_def.h"
-#include "stm32l4xx_hal_spi.h"
 
 #ifdef DEBUG_PINS
 #include <cstdio>
