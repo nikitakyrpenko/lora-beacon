@@ -31,7 +31,7 @@
     "--ulimit=core=-1",
     "--hostname=devcontainer",
     "--add-host=devcontainer:127.0.1.1",
-    "--device=/dev/ttyACM0:/dev/ttyACM0",
+    // "--device=/dev/ttyACM0:/dev/ttyACM0",
     "--group-add=20",
     "--device=/dev/bus/usb/001:/dev/bus/usb/001"
   ],

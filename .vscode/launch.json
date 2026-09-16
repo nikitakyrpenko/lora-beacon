@@ -2,11 +2,11 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug anchor : STM32L476 (st-util)",
+      "name": "Debug bridge : STM32L476 (st-util)",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/anchor/build/Debug/anchor.elf",
-      "cwd": "${workspaceFolder}/anchor",
+      "program": "${workspaceFolder}/bridge/build/Debug/bridge.elf",
+      "cwd": "${workspaceFolder}/bridge",
       "MIMode": "gdb",
       "miDebuggerPath": "/usr/bin/gdb-multiarch",
       "targetArchitecture": "arm",
@@ -15,10 +15,10 @@
       "serverStarted": "Listening at",
       "filterStderr": true,
       "externalConsole": false,
-      "preLaunchTask": "STM32: build (anchor)",
-      "postDebugTask": "STM32: kill stray debug processes (anchor)",
+      "preLaunchTask": "STM32: build (bridge)",
+      "postDebugTask": "STM32: kill stray debug processes (bridge)",
       "customLaunchSetupCommands": [
-        { "text": "file ${workspaceFolder}/anchor/build/Debug/anchor.elf" },
+        { "text": "file ${workspaceFolder}/bridge/build/Debug/bridge.elf" },
         { "text": "target remote localhost:4242" },
         { "text": "monitor reset halt" },
         { "text": "load" }

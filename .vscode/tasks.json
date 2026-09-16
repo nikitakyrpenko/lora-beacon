@@ -2,11 +2,11 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "STM32: build (anchor)",
+      "label": "STM32: build (bridge)",
       "type": "shell",
       "command": "cmake --preset Debug && cmake --build --preset Debug",
       "options": {
-        "cwd": "${workspaceFolder}/anchor"
+        "cwd": "${workspaceFolder}/bridge"
       },
       "group": {
         "kind": "build",
@@ -22,11 +22,11 @@
       }
     },
     {
-      "label": "STM32: clean build directory (anchor)",
+      "label": "STM32: clean build directory (bridge)",
       "type": "shell",
       "command": "rm -rf build",
       "options": {
-        "cwd": "${workspaceFolder}/anchor"
+        "cwd": "${workspaceFolder}/bridge"
       },
       "problemMatcher": [],
       "presentation": {
@@ -36,7 +36,7 @@
       }
     },
     {
-      "label": "STM32: kill stray debug processes (anchor)",
+      "label": "STM32: kill stray debug processes (bridge)",
       "type": "shell",
       "command": "pkill -f st-util; pkill -f gdb-multiarch; true",
       "problemMatcher": [],
@@ -47,14 +47,14 @@
       }
     },
     {
-      "label": "STM32: flash (anchor)",
+      "label": "STM32: flash (bridge)",
       "type": "shell",
-      "command": "arm-none-eabi-objcopy -O binary build/Debug/anchor.elf build/Debug/anchor.bin && st-flash write build/Debug/anchor.bin 0x08000000 && st-flash reset",
+      "command": "arm-none-eabi-objcopy -O binary build/Debug/bridge.elf build/Debug/bridge.bin && st-flash write build/Debug/bridge.bin 0x08000000 && st-flash reset",
       "options": {
-        "cwd": "${workspaceFolder}/anchor"
+        "cwd": "${workspaceFolder}/bridge"
       },
       "dependsOn": [
-        "STM32: build (anchor)"
+        "STM32: build (bridge)"
       ],
       "dependsOrder": "sequence",
       "problemMatcher": [],
@@ -157,6 +157,48 @@
     },
     {
       "label": "STM32: kill stray debug processes (anchor-blackpill)",
+      "type": "shell",
+      "command": "pkill -f st-util; pkill -f gdb-multiarch; true",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "clear": false
+      }
+    },
+    {
+      "label": "STM32: build (beacon-blackpill)",
+      "type": "shell",
+      "command": "cmake --preset Debug && cmake --build --preset Debug",
+      "options": {
+        "cwd": "${workspaceFolder}/beacon-blackpill"
+      },
+      "group": "build",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "STM32: clean build directory (beacon-blackpill)",
+      "type": "shell",
+      "command": "rm -rf build",
+      "options": {
+        "cwd": "${workspaceFolder}/beacon-blackpill"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "STM32: kill stray debug processes (beacon-blackpill)",
       "type": "shell",
       "command": "pkill -f st-util; pkill -f gdb-multiarch; true",
       "problemMatcher": [],

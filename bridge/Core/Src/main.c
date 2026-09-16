@@ -50,8 +50,8 @@ DMA_HandleTypeDef hdma_uart5_rx;
 
 /* USER CODE BEGIN PV */
 
-static uint8_t bridge_uart4_rx_buffer[128];
-static uint8_t bridge_uart5_rx_buffer[128];
+static uint8_t bridge_uart4_rx_buffer[512];
+static uint8_t bridge_uart5_rx_buffer[512];
 
 static const char BRIDGE_TAG_UART4[] = "[ANCHOR-BP] ";
 static const char BRIDGE_TAG_UART5[] = "[BEACON] ";
@@ -328,22 +328,28 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-int __io_putchar(int ch)
-{
-  uint8_t c = (uint8_t)ch;
-  HAL_UART_Transmit(&huart2, &c, 1, HAL_MAX_DELAY);
-  return ch;
-}
-
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef* huart, uint16_t Size)
 {
   if (huart == &huart4) {
     HAL_UART_Transmit(&huart2, (const uint8_t*)BRIDGE_TAG_UART4, sizeof(BRIDGE_TAG_UART4) - 1, HAL_MAX_DELAY);
     HAL_UART_Transmit(&huart2, bridge_uart4_rx_buffer, Size, HAL_MAX_DELAY);
+    __HAL_UART_CLEAR_IDLEFLAG(&huart4);
     HAL_UARTEx_ReceiveToIdle_DMA(&huart4, bridge_uart4_rx_buffer, sizeof(bridge_uart4_rx_buffer));
   } else if (huart == &huart5) {
     HAL_UART_Transmit(&huart2, (const uint8_t*)BRIDGE_TAG_UART5, sizeof(BRIDGE_TAG_UART5) - 1, HAL_MAX_DELAY);
     HAL_UART_Transmit(&huart2, bridge_uart5_rx_buffer, Size, HAL_MAX_DELAY);
+    __HAL_UART_CLEAR_IDLEFLAG(&huart5);
+    HAL_UARTEx_ReceiveToIdle_DMA(&huart5, bridge_uart5_rx_buffer, sizeof(bridge_uart5_rx_buffer));
+  }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef* huart)
+{
+  if (huart == &huart4) {
+    __HAL_UART_CLEAR_IDLEFLAG(&huart4);
+    HAL_UARTEx_ReceiveToIdle_DMA(&huart4, bridge_uart4_rx_buffer, sizeof(bridge_uart4_rx_buffer));
+  } else if (huart == &huart5) {
+    __HAL_UART_CLEAR_IDLEFLAG(&huart5);
     HAL_UARTEx_ReceiveToIdle_DMA(&huart5, bridge_uart5_rx_buffer, sizeof(bridge_uart5_rx_buffer));
   }
 }

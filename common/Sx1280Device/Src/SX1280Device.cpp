@@ -2,7 +2,7 @@
 
 #include "SX1280Device.hpp"
 
-#ifdef DEBUG_PINS
+#ifdef DEBUG_PIN_TRACE
 #include <cstdio>
 static void debug_print_pin(const SX1280Device::GPIO_Pin& pin)
 {

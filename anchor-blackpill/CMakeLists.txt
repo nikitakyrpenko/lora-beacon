@@ -43,8 +43,6 @@ add_subdirectory(cmake/stm32cubemx)
 # Shared SX1280 protocol layer (also consumed by beacon/)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../common/Sx1280Device ${CMAKE_CURRENT_BINARY_DIR}/Sx1280Device)
 target_link_libraries(Sx1280Device PRIVATE stm32cubemx)
-# DEBUG_PINS is per-consumer, not baked into the shared library itself
-target_compile_definitions(Sx1280Device PRIVATE DEBUG_PINS)
 
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
@@ -66,7 +64,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
-    DEBUG_PINS
 )
 
 # Remove wrong libob.a library dependency when using cpp files

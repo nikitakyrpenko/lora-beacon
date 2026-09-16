@@ -20,6 +20,7 @@ void SX1280_Create(SPI_HandleTypeDef* SPI_port,
 
 uint16_t SX1280_Radio_mode();
 uint16_t SX1280_Check_Wake_Word_Matches();
+uint16_t SX1280_Send_Wake_Ack();
 uint16_t SX1280_Ranging_Slave_Mode();
 uint32_t SX1280_Ranging_Window_Ms();
 

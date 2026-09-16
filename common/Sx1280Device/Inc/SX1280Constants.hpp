@@ -40,6 +40,10 @@ static constexpr uint8_t SET_RANGING_ROLE_OP_CODE = 0xA3;
 
 namespace SX1280_VALUES {
 static constexpr uint8_t STDBY_RC_STAND_BY = static_cast<uint8_t>(0x00);
+static constexpr uint8_t STDBY_XOSC_STAND_BY = static_cast<uint8_t>(0x01);  // Table 11-18, required before reading a ranging result
+
+static constexpr uint8_t RANGING_ROLE_SLAVE = 0x00;
+static constexpr uint8_t RANGING_ROLE_MASTER = 0x01;
 
 // PacketType (Table 11-40)
 static constexpr uint8_t PACKET_TYPE_LORA = 0x01;
@@ -88,11 +92,15 @@ static constexpr uint8_t PERIOD_BASE_4_MS = 0x03;
 // not a separate rx/sleep periodBase pair. rxPeriodBaseCount = 0x0000 means "wait until a packet is found", not
 // zero duration.
 
-// Anchor idle-state duty cycle only (rover never calls SetRxDutyCycle) -- first-pass values, NOT validated on
-// hardware yet: with PERIOD_BASE_1_MS this is 10ms RX / 490ms sleep (500ms cycle, ~2% RX duty cycle). Tune once
-// wake latency / power draw can actually be measured -- see PLAN.md Open Items.
+// Anchor idle-state duty cycle only (rover never calls SetRxDutyCycle). Original first-pass values (10ms RX /
+// 490ms sleep, ~2% duty) were validated on hardware and found too sparse against the beacon's short (~1ms)
+// wake-word preamble -- average ~45 beacon broadcasts (~227s) to catch one, confirmed empirically against the
+// theoretical duty-cycle-percentage model. Temporarily tightened to 10ms RX / 90ms sleep (100ms cycle, ~10% duty,
+// ~10 broadcasts / ~50s average wake latency) to unblock anchor+beacon bring-up. NOT a final tuned value --
+// revisit once wake latency / power draw can be measured together and weighed against extending the beacon's
+// preamble instead -- see PLAN.md Open Items.
 static constexpr uint16_t ANCHOR_IDLE_RX_PERIOD_BASE_COUNT = 10;
-static constexpr uint16_t ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT = 490;
+static constexpr uint16_t ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT = 90;
 
 // IRQ bit positions (Table 11-71/13-6x), combined into SetDioIrqParams'/GetIrqStatus'/ClearIrqStatus' 16-bit masks
 static constexpr uint16_t IRQ_BIT_TX_DONE = static_cast<uint16_t>(1u << 0);
@@ -102,6 +110,7 @@ static constexpr uint16_t IRQ_BIT_RANGING_SLAVE_REQUEST_DISCARD = static_cast<ui
 static constexpr uint16_t IRQ_BIT_RANGING_MASTER_RESULT_VALID = static_cast<uint16_t>(1u << 9);
 static constexpr uint16_t IRQ_BIT_RANGING_MASTER_TIMEOUT = static_cast<uint16_t>(1u << 10);
 static constexpr uint16_t IRQ_BIT_RANGING_MASTER_REQUEST_VALID = static_cast<uint16_t>(1u << 11);
+static constexpr uint16_t IRQ_BIT_RX_TX_TIMEOUT = static_cast<uint16_t>(1u << 14);
 
 // Ranging registers (Section 13.5)
 static constexpr uint16_t REG_SF_MODULATION_FIXUP = 0x0925;         // see SF_7_REGISTER_FIXUP above
@@ -144,6 +153,17 @@ static constexpr uint8_t LONG_PREAMBLE_ENABLE = 0x01;
 // namespaces above. Shared verbatim between anchor and rover (once rover exists).
 namespace LORA_BEACON_PROTOCOL {
 static constexpr uint8_t WAKE_WORD[2] = {0xBE, 0xAC};
+// Anchor's reply to a matched wake word, confirming it heard the wake-up and is arming for ranging.
+static constexpr uint8_t WAKE_ACK[2] = {0xAC, 0x4B};
+// Full ack payload: WAKE_ACK magic (2 bytes) + the responding anchor's own 4-byte ranging address, MSB-first, so
+// the beacon learns which anchor answered instead of only ever trusting a hardcoded target_anchor_address. Longer
+// than WAKE_WORD, so unlike the original plain-magic ack, this needs its own SetPacketParams (payload length 6)
+// on both the anchor's TX side and the beacon's RX side -- it can no longer just reuse the wake exchange's params.
+static constexpr uint8_t WAKE_ACK_PAYLOAD_LEN = static_cast<uint8_t>(sizeof(WAKE_ACK) + sizeof(uint32_t));
+// Beacon's software fallback ceiling for the ack wait -- first-pass value, not hardware-validated. The chip's own
+// SetRx timeout for the ack listen (see SX1280_Listen_For_Ack()) is set shorter than this, so this is only a
+// backstop in case DIO1 is somehow missed, same role as the ranging-phase's own fallback ceiling.
+static constexpr uint32_t WAKE_ACK_WINDOW_MS = 150;
 // Fixed, shared compile-time constant for initial anchor+rover bring-up -- first-pass value, NOT
 // hardware-validated yet. Planned to become a rover-supplied runtime value (carried in the wake payload)
 // once basic wake/range exchanges are confirmed working -- see PLAN.md Open Items.

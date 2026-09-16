@@ -52,11 +52,14 @@ UART_HandleTypeDef huart1;
 
 volatile uint8_t DIO1_Callback_detected = 0;
 
-#define SX1280_RADIO_MODE_STEP_COUNT 10U
+#define SX1280_RADIO_MODE_STEP_COUNT 9U  // duty cycling disabled for now -- see SX1280_Radio_mode() in SX1280Bridge.cpp
 #define SX1280_RADIO_MODE_FULL_MASK ((uint16_t)((1u << SX1280_RADIO_MODE_STEP_COUNT) - 1))
 
-#define SX1280_RANGING_MODE_STEP_COUNT 10U
+#define SX1280_RANGING_MODE_STEP_COUNT 11U  // +1 for RangingCalibration -- see SX1280_Ranging_Slave_Mode() in SX1280Bridge.cpp
 #define SX1280_RANGING_MODE_FULL_MASK ((uint16_t)((1u << SX1280_RANGING_MODE_STEP_COUNT) - 1))
+
+#define SX1280_WAKE_ACK_STEP_COUNT 3U  // SetPacketParams, WriteBuffer, SetTx -- see SX1280_Send_Wake_Ack() in SX1280Bridge.cpp
+#define SX1280_WAKE_ACK_FULL_MASK ((uint16_t)((1u << SX1280_WAKE_ACK_STEP_COUNT) - 1))
 
 static uint8_t ranging_active = 0;
 static uint32_t ranging_window_start_tick = 0;
@@ -117,6 +120,7 @@ int main(void)
   uint8_t radio_mode_enabled = (radio_mode_mask == SX1280_RADIO_MODE_FULL_MASK);
   if (radio_mode_enabled) {
     printf("[%lu] entering RADIO\r\n", (unsigned long)HAL_GetTick());
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
   }
   /* USER CODE END 2 */
 
@@ -129,13 +133,36 @@ int main(void)
     /* USER CODE BEGIN 3 */
     if (DIO1_Callback_detected) {
       DIO1_Callback_detected = 0;
-      if (!ranging_active && SX1280_Check_Wake_Word_Matches()) {
-        uint16_t ranging_mode_mask = SX1280_Ranging_Slave_Mode();
-        if (ranging_mode_mask == SX1280_RANGING_MODE_FULL_MASK) {
-          ranging_active = 1;
-          ranging_window_start_tick = HAL_GetTick();
-          printf("[%lu] entering RANGING\r\n", (unsigned long)ranging_window_start_tick);
+      printf("[%lu] DIO1 callback fired (ranging_active=%u)\r\n", (unsigned long)HAL_GetTick(), ranging_active);
+      if (!ranging_active) {
+        uint16_t wake_word_match = SX1280_Check_Wake_Word_Matches();
+        if (wake_word_match) {
+          printf("[%lu] DIO1 callback: wake word matched, switching to slave mode\r\n", (unsigned long)HAL_GetTick());
+          uint16_t wake_ack_mask = SX1280_Send_Wake_Ack();  // fire-and-forget TX; BUSY-gates the next SPI step
+          printf("[%lu] SX1280_Send_Wake_Ack mask=0x%X (full=0x%X)%s\r\n",
+                 (unsigned long)HAL_GetTick(),
+                 wake_ack_mask,
+                 SX1280_WAKE_ACK_FULL_MASK,
+                 (wake_ack_mask == SX1280_WAKE_ACK_FULL_MASK) ? " OK" : " INCOMPLETE");
+          uint16_t ranging_mode_mask = SX1280_Ranging_Slave_Mode();
+          if (ranging_mode_mask == SX1280_RANGING_MODE_FULL_MASK) {
+            ranging_active = 1;
+            ranging_window_start_tick = HAL_GetTick();
+            printf("[%lu] entering RANGING\r\n", (unsigned long)ranging_window_start_tick);
+          }
+        } else {
+          printf("[%lu] DIO1 callback: wake word check returned no-match\r\n", (unsigned long)HAL_GetTick());
         }
+      }
+    }
+
+    {
+      static uint32_t dio1_poll_last_tick = 0;
+      if (HAL_GetTick() - dio1_poll_last_tick >= 1000) {
+        dio1_poll_last_tick = HAL_GetTick();
+        GPIO_PinState dio1_raw_level = HAL_GPIO_ReadPin(DIO1_GPIO_Port, DIO1_Pin);
+        printf("[%lu] raw DIO1 pin level (GPIO read only, no SPI) = %s\r\n",
+               (unsigned long)HAL_GetTick(), dio1_raw_level == GPIO_PIN_SET ? "HIGH" : "LOW");
       }
     }
 
@@ -149,8 +176,6 @@ int main(void)
       }
     }
 
-    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-    HAL_Delay(ranging_active ? 100 : 500);
   }
   /* USER CODE END 3 */
 }
@@ -423,7 +448,7 @@ int __io_putchar(int ch)
   return ch;
 }
 
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == DIO1_Pin) {
     DIO1_Callback_detected = 1;
