@@ -127,7 +127,7 @@
     {
       "label": "STM32: build (anchor-blackpill)",
       "type": "shell",
-      "command": "cmake --preset Debug && cmake --build --preset Debug",
+      "command": "cmake --preset Debug -DBRINGUP_MODE=2 -DDEBUG_ANCHOR=ON && cmake --build --preset Debug",
       "options": {
         "cwd": "${workspaceFolder}/anchor-blackpill"
       },

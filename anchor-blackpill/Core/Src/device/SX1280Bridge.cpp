@@ -1,6 +1,6 @@
 #include <cstddef>
 #include <cstdio>
-#include <stdint.h>
+#include <cstdint>
 
 #include "stm32h5xx_hal.h"
 
@@ -9,7 +9,6 @@
 #include "SX1280Device.hpp"
 
 #ifdef DEBUG_PINS
-#include <cstdio>
 static void debug_print_step(const char* name, HAL_StatusTypeDef hal, const SX1280Device::SX1280_Status& sta)
 {
   printf("[%lu] %s: hal=%d cmd_status=%d busy=%d\r\n",
@@ -36,15 +35,15 @@ static constexpr uint32_t ANCHOR_RANGING_ADDRESS = 0x00000A19;
 static constexpr uint32_t ACK_SLOT_DELAY_MS =
   (ANCHOR_RANGING_ADDRESS - LORA_BEACON_PROTOCOL::RANGING_ADDRESS_BLOCK_BASE) * LORA_BEACON_PROTOCOL::ANCHOR_ACK_SLOT_WIDTH_MS;
 
-extern "C" void SX1280_Create(SPI_HandleTypeDef* SPI_port,
-                              GPIO_TypeDef* BUSY_GPIO_port,
-                              GPIO_TypeDef* NSS_GPIO_port,
-                              GPIO_TypeDef* NRESET_GPIO_port,
-                              GPIO_TypeDef* TCXOEN_GPIO_port,
-                              uint16_t BUSY_pin,
-                              uint16_t NSS_pin,
-                              uint16_t NRESET_pin,
-                              uint16_t TCXOEN_pin)
+void SX1280_Create(SPI_HandleTypeDef* SPI_port,
+                   GPIO_TypeDef* BUSY_GPIO_port,
+                   GPIO_TypeDef* NSS_GPIO_port,
+                   GPIO_TypeDef* NRESET_GPIO_port,
+                   GPIO_TypeDef* TCXOEN_GPIO_port,
+                   uint16_t BUSY_pin,
+                   uint16_t NSS_pin,
+                   uint16_t NRESET_pin,
+                   uint16_t TCXOEN_pin)
 {
   if (LoRa_SX1280 == nullptr) {
     static SX1280Device device(
@@ -101,7 +100,40 @@ static uint16_t execute_step(const Sx1280Step* steps, size_t count)
   return mask;
 }
 
-extern "C" uint16_t SX1280_Radio_mode()
+HAL_StatusTypeDef SX1280_Get_Irq_Mask(uint16_t* mask_out)
+{
+  SX1280Device::SX1280_Status sta{};
+
+  uint8_t tx_irq_status[3] = {};
+  uint8_t rx_irq_status[3] = {};
+  HAL_StatusTypeDef hal = LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::GET_IRQ_STATUS_OP_CODE, tx_irq_status, rx_irq_status, 3, &sta);
+
+  // sta.command_status reflects whatever command ran *before* this GetIrqStatus read, not whether this read
+  // itself succeeded -- see the identical reasoning on the beacon side (SX1280_Get_Irq_Mask()) for why this
+  // must gate on hal alone, and why the caller now gets that directly via the return value.
+  if (hal != HAL_OK) {
+    *mask_out = 0x0000;
+    return hal;
+  }
+
+  *mask_out = (static_cast<uint16_t>(rx_irq_status[1]) << 8) | rx_irq_status[2];
+  return hal;
+}
+
+void SX1280_Clear_Irq_Status_Raw()
+{
+  SX1280Device::SX1280_Status sta{};
+  uint8_t tx_clear_irq[2] = {0xFF, 0xFF};
+  LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::CLEAR_IRQ_STATUS_OP_CODE, tx_clear_irq, nullptr, 2, &sta);
+}
+
+HAL_StatusTypeDef SX1280_Get_Status(SX1280Device::SX1280_Status* sta)
+{
+  uint8_t tx_status[1] = {0x00};
+  return LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::GET_STATUS_OP_CODE, tx_status, nullptr, 1, sta);
+}
+
+uint16_t SX1280_Radio_mode()
 {
   uint8_t packet[7] = {SX1280_VALUES::LORA_PREAMBLE_12_SYMBOLS,
                        SX1280_VALUES::EXPLICIT_HEADER,
@@ -145,7 +177,7 @@ extern "C" uint16_t SX1280_Radio_mode()
   return execute_step(radio_steps, sizeof(radio_steps) / sizeof(radio_steps[0]));
 }
 
-extern "C" uint16_t SX1280_Ranging_Slave_Mode()
+uint16_t SX1280_Ranging_Slave_Mode()
 {
   uint8_t packet[7] = {SX1280_VALUES::LORA_PREAMBLE_12_SYMBOLS,
                        SX1280_VALUES::EXPLICIT_HEADER,
@@ -205,12 +237,12 @@ extern "C" uint16_t SX1280_Ranging_Slave_Mode()
   return execute_step(ranging_steps, sizeof(ranging_steps) / sizeof(ranging_steps[0]));
 }
 
-extern "C" uint32_t SX1280_Ranging_Window_Ms()
+uint32_t SX1280_Ranging_Window_Ms()
 {
   return LORA_BEACON_PROTOCOL::RANGING_WINDOW_MS;
 }
 
-extern "C" uint16_t SX1280_Check_Wake_Word_Matches(uint32_t* ranging_window_ms_out)
+uint16_t SX1280_Check_Wake_Word_Matches(uint32_t* ranging_window_ms_out)
 {
   SX1280Device::SX1280_Status sta{};
 
@@ -264,7 +296,8 @@ extern "C" uint16_t SX1280_Check_Wake_Word_Matches(uint32_t* ranging_window_ms_o
     // requirement for this feature.
     if (received_ms < LORA_BEACON_PROTOCOL::RANGING_WINDOW_MIN_MS) {
       received_ms = LORA_BEACON_PROTOCOL::RANGING_WINDOW_MIN_MS;
-    } else if (received_ms > LORA_BEACON_PROTOCOL::RANGING_WINDOW_MAX_MS) {
+    }
+    else if (received_ms > LORA_BEACON_PROTOCOL::RANGING_WINDOW_MAX_MS) {
       received_ms = LORA_BEACON_PROTOCOL::RANGING_WINDOW_MAX_MS;
     }
     *ranging_window_ms_out = received_ms;
@@ -273,7 +306,7 @@ extern "C" uint16_t SX1280_Check_Wake_Word_Matches(uint32_t* ranging_window_ms_o
   return 1;
 }
 
-extern "C" uint16_t SX1280_Send_Wake_Ack()
+uint16_t SX1280_Send_Wake_Ack()
 {
   // No SetStandby/SetPacketType/SetModulationParams needed here: SX1280_Radio_mode()'s periodBaseCount=0x0000
   // SetRx is single-shot (per the datasheet, it auto-returns to STDBY_RC the moment RxDone fires), so by the time
@@ -289,14 +322,13 @@ extern "C" uint16_t SX1280_Send_Wake_Ack()
                        0x00,
                        0x00};
 
-  uint8_t write_buffer[1 + LORA_BEACON_PROTOCOL::WAKE_ACK_PAYLOAD_LEN] = {
-    0x00,
-    LORA_BEACON_PROTOCOL::WAKE_ACK[0],
-    LORA_BEACON_PROTOCOL::WAKE_ACK[1],
-    static_cast<uint8_t>(ANCHOR_RANGING_ADDRESS >> 24),
-    static_cast<uint8_t>(ANCHOR_RANGING_ADDRESS >> 16),
-    static_cast<uint8_t>(ANCHOR_RANGING_ADDRESS >> 8),
-    static_cast<uint8_t>(ANCHOR_RANGING_ADDRESS & 0xFF)};
+  uint8_t write_buffer[1 + LORA_BEACON_PROTOCOL::WAKE_ACK_PAYLOAD_LEN] = {0x00,
+                                                                          LORA_BEACON_PROTOCOL::WAKE_ACK[0],
+                                                                          LORA_BEACON_PROTOCOL::WAKE_ACK[1],
+                                                                          static_cast<uint8_t>(ANCHOR_RANGING_ADDRESS >> 24),
+                                                                          static_cast<uint8_t>(ANCHOR_RANGING_ADDRESS >> 16),
+                                                                          static_cast<uint8_t>(ANCHOR_RANGING_ADDRESS >> 8),
+                                                                          static_cast<uint8_t>(ANCHOR_RANGING_ADDRESS & 0xFF)};
   uint8_t tx[3] = {SX1280_VALUES::PERIOD_BASE_1_MS, 0x00, 0x00};  // timeoutCount=0x0000 -> single-shot TX
 
   const Sx1280Step send_steps[] = {
@@ -308,38 +340,7 @@ extern "C" uint16_t SX1280_Send_Wake_Ack()
   return execute_step(send_steps, sizeof(send_steps) / sizeof(send_steps[0]));
 }
 
-extern "C" uint32_t SX1280_Ack_Slot_Delay_Ms()
+uint32_t SX1280_Ack_Slot_Delay_Ms()
 {
   return ACK_SLOT_DELAY_MS;
-}
-
-extern "C" uint16_t SX1280_Get_Irq_Status_Raw(uint8_t* hal_status_out, uint8_t* command_status_out)
-{
-  SX1280Device::SX1280_Status sta{};
-
-  uint8_t tx_irq_status[3] = {};
-  uint8_t rx_irq_status[3] = {};
-  HAL_StatusTypeDef hal = LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::GET_IRQ_STATUS_OP_CODE, tx_irq_status, rx_irq_status, 3, &sta);
-
-  if (hal_status_out != nullptr) {
-    *hal_status_out = static_cast<uint8_t>(hal);
-  }
-  if (command_status_out != nullptr) {
-    *command_status_out = static_cast<uint8_t>(sta.command_status);
-  }
-
-  // command_status reflects whatever command ran *before* this read, not whether this read itself succeeded --
-  // see the identical fix on the beacon side (SX1280_Get_Irq_Status_Raw()) for why this must gate on hal alone.
-  if (hal != HAL_OK) {
-    return 0x0000;
-  }
-
-  return (static_cast<uint16_t>(rx_irq_status[1]) << 8) | rx_irq_status[2];
-}
-
-extern "C" void SX1280_Clear_Irq_Status_Raw()
-{
-  SX1280Device::SX1280_Status sta{};
-  uint8_t tx_clear_irq[2] = {0xFF, 0xFF};
-  LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::CLEAR_IRQ_STATUS_OP_CODE, tx_clear_irq, nullptr, 2, &sta);
 }

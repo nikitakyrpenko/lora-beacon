@@ -1,5 +1,4 @@
 #include <cstdint>
-
 #include "SX1280Device.hpp"
 
 #ifdef DEBUG_PIN_TRACE

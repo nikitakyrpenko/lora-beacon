@@ -1,6 +1,6 @@
 #include <cstddef>
 #include <cstdio>
-#include <stdint.h>
+#include <cstdint>
 
 #include "stm32h5xx_hal.h"
 
@@ -9,7 +9,6 @@
 #include "SX1280Device.hpp"
 
 #ifdef DEBUG_PINS
-#include <cstdio>
 static void debug_print_step(const char* name, HAL_StatusTypeDef hal, const SX1280Device::SX1280_Status& sta)
 {
   printf("[%lu] %s: hal=%d cmd_status=%d busy=%d\r\n",
@@ -26,15 +25,15 @@ static void debug_print_step(const char* name, HAL_StatusTypeDef hal, const SX12
 
 static SX1280Device* LoRa_SX1280 = nullptr;
 
-extern "C" void SX1280_Create(SPI_HandleTypeDef* SPI_port,
-                              GPIO_TypeDef* BUSY_GPIO_port,
-                              GPIO_TypeDef* NSS_GPIO_port,
-                              GPIO_TypeDef* NRESET_GPIO_port,
-                              GPIO_TypeDef* TCXOEN_GPIO_port,
-                              uint16_t BUSY_pin,
-                              uint16_t NSS_pin,
-                              uint16_t NRESET_pin,
-                              uint16_t TCXOEN_pin)
+void SX1280_Create(SPI_HandleTypeDef* SPI_port,
+                   GPIO_TypeDef* BUSY_GPIO_port,
+                   GPIO_TypeDef* NSS_GPIO_port,
+                   GPIO_TypeDef* NRESET_GPIO_port,
+                   GPIO_TypeDef* TCXOEN_GPIO_port,
+                   uint16_t BUSY_pin,
+                   uint16_t NSS_pin,
+                   uint16_t NRESET_pin,
+                   uint16_t TCXOEN_pin)
 {
   if (LoRa_SX1280 == nullptr) {
     static SX1280Device device(
@@ -49,8 +48,9 @@ static bool step_ok(HAL_StatusTypeDef hal, const SX1280Device::SX1280_Status& st
 {
   // COMMAND_TIMEOUT is included because it's the legitimate status GetIrqStatus reports right after a ranging
   // request that genuinely times out (no anchor response) -- without it, step_ok() rejected that exact status
-  // and SX1280_Get_Irq_Status_Raw() returned its 0xFFFF failure sentinel instead of the real IRQ bits, which
-  // has RANGING_MASTER_RESULT_VALID_BIT set and got misread as a valid (stale) result every single timeout.
+  // and SX1280_Get_Irq_Mask() (then named SX1280_Get_Irq_Status_Raw()) returned its 0xFFFF failure sentinel
+  // instead of the real IRQ bits, which has RANGING_MASTER_RESULT_VALID_BIT set and got misread as a valid
+  // (stale) result every single timeout.
   return hal == HAL_OK && (sta.command_status == SX1280Device::CommandStatus::COMMAND_SUCCESS ||
                            sta.command_status == SX1280Device::CommandStatus::RESERVED ||
                            sta.command_status == SX1280Device::CommandStatus::COMMAND_TX_DONE ||
@@ -96,7 +96,43 @@ static uint16_t execute_step(const Sx1280Step* steps, size_t count)
   return mask;
 }
 
-extern "C" uint16_t SX1280_Beacon_Radio()
+HAL_StatusTypeDef SX1280_Get_Irq_Mask(uint16_t* mask_out)
+{
+  SX1280Device::SX1280_Status sta{};
+
+  uint8_t tx_irq_status[3] = {};
+  uint8_t rx_irq_status[3] = {};
+  HAL_StatusTypeDef hal = LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::GET_IRQ_STATUS_OP_CODE, tx_irq_status, rx_irq_status, 3, &sta);
+
+  // sta.command_status reflects whatever command ran *before* this GetIrqStatus read (TX_DONE, TIMEOUT, a
+  // ranging ResultValid, etc.) -- it says nothing about whether this read itself succeeded, so gating on a
+  // command_status whitelist here would be wrong. Only the HAL transfer result (hal) is meaningful here; the
+  // caller now gets that directly via the return value instead of it being conflated with the mask itself.
+  if (hal != HAL_OK) {
+    // 0x0000 (no bits set), not left untouched -- a caller checking RANGING_MASTER_RESULT_VALID_BIT first must
+    // not misread a failed read as a valid ranging result.
+    *mask_out = 0x0000;
+    return hal;
+  }
+
+  *mask_out = (static_cast<uint16_t>(rx_irq_status[1]) << 8) | rx_irq_status[2];
+  return hal;
+}
+
+void SX1280_Clear_Irq_Status_Raw()
+{
+  SX1280Device::SX1280_Status sta{};
+  uint8_t tx_clear_irq[2] = {0xFF, 0xFF};
+  LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::CLEAR_IRQ_STATUS_OP_CODE, tx_clear_irq, nullptr, 2, &sta);
+}
+
+HAL_StatusTypeDef SX1280_Get_Status(SX1280Device::SX1280_Status* sta)
+{
+  uint8_t tx_status[1] = {0x00};
+  return LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::GET_STATUS_OP_CODE, tx_status, nullptr, 1, sta);
+}
+
+uint16_t SX1280_Beacon_Radio()
 {
   uint8_t packet[7] = {SX1280_VALUES::LORA_PREAMBLE_12_SYMBOLS,
                        SX1280_VALUES::EXPLICIT_HEADER,
@@ -133,7 +169,7 @@ extern "C" uint16_t SX1280_Beacon_Radio()
   return execute_step(radio_steps, sizeof(radio_steps) / sizeof(radio_steps[0]));
 }
 
-extern "C" uint8_t SX1280_Was_Tx_Done()
+uint8_t SX1280_Was_Tx_Done()
 {
   SX1280Device::SX1280_Status sta{};
 
@@ -153,59 +189,7 @@ extern "C" uint8_t SX1280_Was_Tx_Done()
   return (irq_status & SX1280_VALUES::IRQ_BIT_TX_DONE) ? 1 : 0;
 }
 
-extern "C" uint16_t SX1280_Get_Irq_Status_Raw(uint8_t* hal_status_out, uint8_t* command_status_out)
-{
-  SX1280Device::SX1280_Status sta{};
-
-  uint8_t tx_irq_status[3] = {};
-  uint8_t rx_irq_status[3] = {};
-  HAL_StatusTypeDef hal = LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::GET_IRQ_STATUS_OP_CODE, tx_irq_status, rx_irq_status, 3, &sta);
-
-  if (hal_status_out != nullptr) {
-    *hal_status_out = static_cast<uint8_t>(hal);
-  }
-  if (command_status_out != nullptr) {
-    *command_status_out = static_cast<uint8_t>(sta.command_status);
-  }
-
-  // command_status reflects whatever command ran *before* this GetIrqStatus read (TX_DONE, TIMEOUT, a ranging
-  // ResultValid, etc.) -- it says nothing about whether this read itself succeeded, so gating on step_ok()'s
-  // command_status whitelist here is wrong: any status value not on that list (there will always be one
-  // eventually) falls through to the failure path below. Only the HAL transfer result is meaningful here.
-  if (hal != HAL_OK) {
-    // 0x0000 (no bits set), not 0xFFFF -- a 0xFFFF sentinel has RANGING_MASTER_RESULT_VALID_BIT set, which a
-    // caller checking that bit first would misread as a valid ranging result instead of "read failed."
-    return 0x0000;
-  }
-
-  return (static_cast<uint16_t>(rx_irq_status[1]) << 8) | rx_irq_status[2];
-}
-
-extern "C" void SX1280_Clear_Irq_Status_Raw()
-{
-  SX1280Device::SX1280_Status sta{};
-  uint8_t tx_clear_irq[2] = {0xFF, 0xFF};
-  LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::CLEAR_IRQ_STATUS_OP_CODE, tx_clear_irq, nullptr, 2, &sta);
-}
-
-extern "C" void SX1280_Get_Status_Raw(uint8_t* circuit_mode_out, uint8_t* command_status_out)
-{
-  SX1280Device::SX1280_Status sta{};
-
-  uint8_t tx_status[1] = {0x00};
-  HAL_StatusTypeDef hal = LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::GET_STATUS_OP_CODE, tx_status, nullptr, 1, &sta);
-
-  if (hal != HAL_OK) {
-    *circuit_mode_out = 0xFF;
-    *command_status_out = 0xFF;
-    return;
-  }
-
-  *circuit_mode_out = static_cast<uint8_t>(sta.circuit_mode);
-  *command_status_out = static_cast<uint8_t>(sta.command_status);
-}
-
-extern "C" uint16_t SX1280_Send_Wake_Broadcast()
+uint16_t SX1280_Send_Wake_Broadcast()
 {
   // Wake payload now carries the ranging-window duration (ms, MSB-first) alongside the magic, so the anchor can
   // arm its ARMED-window timer from a rover-supplied value instead of its own compile-time constant. Sends
@@ -227,7 +211,7 @@ extern "C" uint16_t SX1280_Send_Wake_Broadcast()
   return execute_step(send_steps, sizeof(send_steps) / sizeof(send_steps[0]));
 }
 
-extern "C" uint16_t SX1280_Listen_For_Ack()
+uint16_t SX1280_Listen_For_Ack()
 {
   // Reuses the frequency/modulation already active from SX1280_Beacon_Radio() (the wake broadcast just went out
   // in that same config) -- but packet params DO need reissuing: the ack payload (magic + anchor's 4-byte
@@ -266,7 +250,7 @@ extern "C" uint16_t SX1280_Listen_For_Ack()
   return execute_step(steps, sizeof(steps) / sizeof(steps[0]));
 }
 
-extern "C" uint16_t SX1280_Stop_Ack_Listen()
+uint16_t SX1280_Stop_Ack_Listen()
 {
   // Continuous RX doesn't stop on its own -- must explicitly SetStandby before reconfiguring for ranging, since
   // SX1280_Ranging_Master_Mode() doesn't start with its own SetStandby (assumes the caller already left the chip
@@ -277,7 +261,7 @@ extern "C" uint16_t SX1280_Stop_Ack_Listen()
   return execute_step(steps, sizeof(steps) / sizeof(steps[0]));
 }
 
-extern "C" uint16_t SX1280_Check_Wake_Ack_Matches(uint32_t* anchor_address_out)
+uint16_t SX1280_Check_Wake_Ack_Matches(uint32_t* anchor_address_out)
 {
   // No leading ClearIrqStatus here (unlike the anchor's SX1280_Check_Wake_Word_Matches()) -- the caller in
   // main.c already clears IRQ status when it picks up DIO1_Callback_detected for this phase.
@@ -290,6 +274,10 @@ extern "C" uint16_t SX1280_Check_Wake_Ack_Matches(uint32_t* anchor_address_out)
     LoRa_SX1280->SPI_write(&SX1280_OPERATIONS::READ_BUFFER_STATUS_OP_CODE, tx_buffer_status, rx_buffer_status, 3, &sta);
 
   if (!step_ok(hal, sta)) {
+#ifdef DEBUG_PINS
+    printf("[%lu] SX1280_Check_Wake_Ack_Matches: ReadBufferStatus failed hal=%d cmd_status=%d busy=%d\r\n",
+           (unsigned long)HAL_GetTick(), static_cast<int>(hal), static_cast<int>(sta.command_status), static_cast<int>(sta.busy));
+#endif
     return 0;
   }
 
@@ -298,6 +286,10 @@ extern "C" uint16_t SX1280_Check_Wake_Ack_Matches(uint32_t* anchor_address_out)
 
   constexpr uint8_t PAYLOAD_LEN = LORA_BEACON_PROTOCOL::WAKE_ACK_PAYLOAD_LEN;
   if (rx_len != PAYLOAD_LEN) {
+#ifdef DEBUG_PINS
+    printf("[%lu] SX1280_Check_Wake_Ack_Matches: length mismatch rx_len=%u expected=%u\r\n",
+           (unsigned long)HAL_GetTick(), rx_len, PAYLOAD_LEN);
+#endif
     return 0;
   }
 
@@ -308,6 +300,10 @@ extern "C" uint16_t SX1280_Check_Wake_Ack_Matches(uint32_t* anchor_address_out)
     &SX1280_OPERATIONS::READ_BUFFER_OP_CODE, tx_read_buffer, rx_read_buffer, static_cast<uint16_t>(sizeof(tx_read_buffer)), &sta);
 
   if (!step_ok(hal, sta)) {
+#ifdef DEBUG_PINS
+    printf("[%lu] SX1280_Check_Wake_Ack_Matches: ReadBuffer failed hal=%d cmd_status=%d busy=%d\r\n",
+           (unsigned long)HAL_GetTick(), static_cast<int>(hal), static_cast<int>(sta.command_status), static_cast<int>(sta.busy));
+#endif
     return 0;
   }
 
@@ -315,6 +311,10 @@ extern "C" uint16_t SX1280_Check_Wake_Ack_Matches(uint32_t* anchor_address_out)
   constexpr uint8_t MAGIC_LEN = sizeof(LORA_BEACON_PROTOCOL::WAKE_ACK);
   for (uint8_t i = 0; i < MAGIC_LEN; ++i) {
     if (payload[i] != LORA_BEACON_PROTOCOL::WAKE_ACK[i]) {
+#ifdef DEBUG_PINS
+      printf("[%lu] SX1280_Check_Wake_Ack_Matches: magic mismatch at byte %u got=0x%02X want=0x%02X\r\n",
+             (unsigned long)HAL_GetTick(), i, payload[i], LORA_BEACON_PROTOCOL::WAKE_ACK[i]);
+#endif
       return 0;
     }
   }
@@ -328,7 +328,7 @@ extern "C" uint16_t SX1280_Check_Wake_Ack_Matches(uint32_t* anchor_address_out)
   return 1;
 }
 
-extern "C" uint16_t SX1280_Ranging_Master_Mode(uint32_t target_anchor_address)
+uint16_t SX1280_Ranging_Master_Mode(uint32_t target_anchor_address)
 {
   uint8_t packet[7] = {SX1280_VALUES::LORA_PREAMBLE_12_SYMBOLS,
                        SX1280_VALUES::EXPLICIT_HEADER,
@@ -384,7 +384,7 @@ extern "C" uint16_t SX1280_Ranging_Master_Mode(uint32_t target_anchor_address)
   return execute_step(ranging_steps, sizeof(ranging_steps) / sizeof(ranging_steps[0]));
 }
 
-extern "C" uint16_t SX1280_Send_Ranging_Request()
+uint16_t SX1280_Send_Ranging_Request()
 {
   uint8_t tx[3] = {SX1280_VALUES::PERIOD_BASE_1_MS, 0x03, 0xE8};  // 1000ms timeout, comfortably inside anchor's 2000ms RANGING_WINDOW_MS
 
@@ -401,7 +401,7 @@ extern "C" uint16_t SX1280_Send_Ranging_Request()
 // original state (not in the datasheet's own procedure, but leaving it permanently forced open broke later
 // exchanges -- see the comment at that step) -> SetStandby(RC). Returns 0 (and leaves *distance_cm_out untouched)
 // on any SPI step failing partway through.
-extern "C" uint8_t SX1280_Read_Ranging_Result_Cm(int32_t* distance_cm_out)
+uint8_t SX1280_Read_Ranging_Result_Cm(int32_t* distance_cm_out)
 {
   SX1280Device::SX1280_Status sta{};
   HAL_StatusTypeDef hal;

@@ -24,6 +24,16 @@ endif()
 # Set the project name
 set(CMAKE_PROJECT_NAME beacon-blackpill)
 
+# Bring-up test mode: 0 = production, 1 = board-level bring-up, 2 = module-level bring-up.
+# Override at configure time: cmake -B build -DBRINGUP_MODE=2 ..
+set(BRINGUP_MODE 2 CACHE STRING "SX1280 bring-up test mode (0/1/2)")
+
+# SX1280Bridge.cpp: per-step SPI hal/cmd_status/busy print on every execute_step() call. Off by default -- too
+# noisy for normal use. Override: cmake -B build -DDEBUG_PINS=ON ..
+option(DEBUG_PINS "Enable SX1280Bridge.cpp per-step SPI trace" OFF)
+# SX1280Device.cpp: prints every GPIO_Pin (BUSY/NSS/NRESET/TCXOEN) level change. Off by default -- same reason.
+option(DEBUG_PIN_TRACE "Enable SX1280Device.cpp per-GPIO-edge trace" OFF)
+
 # Enable compile command to ease indexing with e.g. clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
@@ -43,6 +53,10 @@ add_subdirectory(cmake/stm32cubemx)
 # Shared SX1280 protocol layer (also consumed by beacon/)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../common/Sx1280Device ${CMAKE_CURRENT_BINARY_DIR}/Sx1280Device)
 target_link_libraries(Sx1280Device PRIVATE stm32cubemx)
+# DEBUG_PIN_TRACE is consumed inside this library's own SX1280Device.cpp -- setting it only on the executable
+# target below would NOT propagate here (target_compile_definitions PRIVATE never crosses a
+# target_link_libraries edge), so it must be set on this target too for the tracing to actually activate.
+target_compile_definitions(Sx1280Device PRIVATE $<$<BOOL:${DEBUG_PIN_TRACE}>:DEBUG_PIN_TRACE>)
 
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
@@ -64,8 +78,8 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
-    DEBUG_PINS       # SX1280Bridge.cpp: per-step SPI hal/cmd_status/busy print on every execute_step() call
-    DEBUG_PIN_TRACE  # SX1280Device.cpp: prints every GPIO_Pin (BUSY/NSS/NRESET/TCXOEN) level change
+    $<$<BOOL:${DEBUG_PINS}>:DEBUG_PINS>
+    BRINGUP_MODE=${BRINGUP_MODE}
 )
 
 # Remove wrong libob.a library dependency when using cpp files

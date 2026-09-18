@@ -24,6 +24,13 @@ endif()
 # Set the project name
 set(CMAKE_PROJECT_NAME anchor-blackpill)
 
+# Bring-up test mode: 0 = production, 1 = board-level bring-up, 2 = module-level bring-up.
+# Override at configure time: cmake -B build -DBRINGUP_MODE=2 ..
+set(BRINGUP_MODE 2 CACHE STRING "SX1280 bring-up test mode (0/1/2)")
+
+# AnchorBridge.cpp: ANCHOR_LOG() diagnostics on/off. Override: cmake -B build -DDEBUG_ANCHOR=ON ..
+option(DEBUG_ANCHOR "Enable AnchorBridge ANCHOR_LOG() diagnostics" ON)
+
 # Enable compile command to ease indexing with e.g. clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
@@ -53,6 +60,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
      Core/Src/device/SX1280Bridge.cpp
+     Core/Src/device/AnchorBridge.cpp
 )
 
 # Add include paths
@@ -64,6 +72,8 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
+    BRINGUP_MODE=${BRINGUP_MODE}
+    $<$<BOOL:${DEBUG_ANCHOR}>:DEBUG_ANCHOR>  # AnchorBridge.cpp: ANCHOR_LOG() diagnostics on/off
 )
 
 # Remove wrong libob.a library dependency when using cpp files
