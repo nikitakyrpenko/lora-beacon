@@ -225,12 +225,12 @@ uint16_t SX1280_Listen_For_Ack()
                        0x00,
                        0x00};
 
-  // Continuous RX (periodBaseCount=0xFFFF, datasheet SetRx behavior table): the chip keeps listening and reports
-  // an RxDone indication for EACH incoming packet without needing to be manually re-armed between catches -- what
-  // the collect phase in main.c needs to gather multiple anchors' ACKs. RxTxTimeout doesn't apply in this mode
-  // (no per-listen timeout), so only RX_DONE is masked; the overall collect-phase ceiling is software-driven
-  // (main.c), not chip-driven.
-  constexpr uint16_t ack_irq_bits = SX1280_VALUES::IRQ_BIT_RX_DONE;
+  // Timeout-active RX (periodBaseCount=0x0064 -> 100ms, datasheet SetRx behavior table), not Continuous
+  // (0xFFFF) -- reverted back to this after the switch to Continuous regressed ack reception (last known-good
+  // at commit 9ba7c83). Per the datasheet, this mode still reports RxDone for each incoming packet and
+  // restarts its own timer on each one, so it still gathers multiple anchors' ACKs; the 100ms chip-side ceiling
+  // sits inside the overall software collect-phase ceiling in main.c as a fallback, not the primary one.
+  constexpr uint16_t ack_irq_bits = SX1280_VALUES::IRQ_BIT_RX_DONE | SX1280_VALUES::IRQ_BIT_RX_TX_TIMEOUT;
   uint8_t irq_mask[8] = {static_cast<uint8_t>(ack_irq_bits >> 8),
                          static_cast<uint8_t>(ack_irq_bits),
                          static_cast<uint8_t>(ack_irq_bits >> 8),
@@ -239,7 +239,7 @@ uint16_t SX1280_Listen_For_Ack()
                          0x0,
                          0x0,
                          0x0};
-  uint8_t rx[3] = {SX1280_VALUES::PERIOD_BASE_1_MS, 0xFF, 0xFF};
+  uint8_t rx[3] = {SX1280_VALUES::PERIOD_BASE_1_MS, 0x00, 0x64};
 
   const Sx1280Step steps[] = {
     {"SetPacketParams", &SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE, packet, 7},
@@ -276,7 +276,10 @@ uint16_t SX1280_Check_Wake_Ack_Matches(uint32_t* anchor_address_out)
   if (!step_ok(hal, sta)) {
 #ifdef DEBUG_PINS
     printf("[%lu] SX1280_Check_Wake_Ack_Matches: ReadBufferStatus failed hal=%d cmd_status=%d busy=%d\r\n",
-           (unsigned long)HAL_GetTick(), static_cast<int>(hal), static_cast<int>(sta.command_status), static_cast<int>(sta.busy));
+           (unsigned long)HAL_GetTick(),
+           static_cast<int>(hal),
+           static_cast<int>(sta.command_status),
+           static_cast<int>(sta.busy));
 #endif
     return 0;
   }
@@ -287,8 +290,8 @@ uint16_t SX1280_Check_Wake_Ack_Matches(uint32_t* anchor_address_out)
   constexpr uint8_t PAYLOAD_LEN = LORA_BEACON_PROTOCOL::WAKE_ACK_PAYLOAD_LEN;
   if (rx_len != PAYLOAD_LEN) {
 #ifdef DEBUG_PINS
-    printf("[%lu] SX1280_Check_Wake_Ack_Matches: length mismatch rx_len=%u expected=%u\r\n",
-           (unsigned long)HAL_GetTick(), rx_len, PAYLOAD_LEN);
+    printf(
+      "[%lu] SX1280_Check_Wake_Ack_Matches: length mismatch rx_len=%u expected=%u\r\n", (unsigned long)HAL_GetTick(), rx_len, PAYLOAD_LEN);
 #endif
     return 0;
   }
@@ -302,7 +305,10 @@ uint16_t SX1280_Check_Wake_Ack_Matches(uint32_t* anchor_address_out)
   if (!step_ok(hal, sta)) {
 #ifdef DEBUG_PINS
     printf("[%lu] SX1280_Check_Wake_Ack_Matches: ReadBuffer failed hal=%d cmd_status=%d busy=%d\r\n",
-           (unsigned long)HAL_GetTick(), static_cast<int>(hal), static_cast<int>(sta.command_status), static_cast<int>(sta.busy));
+           (unsigned long)HAL_GetTick(),
+           static_cast<int>(hal),
+           static_cast<int>(sta.command_status),
+           static_cast<int>(sta.busy));
 #endif
     return 0;
   }
@@ -313,7 +319,10 @@ uint16_t SX1280_Check_Wake_Ack_Matches(uint32_t* anchor_address_out)
     if (payload[i] != LORA_BEACON_PROTOCOL::WAKE_ACK[i]) {
 #ifdef DEBUG_PINS
       printf("[%lu] SX1280_Check_Wake_Ack_Matches: magic mismatch at byte %u got=0x%02X want=0x%02X\r\n",
-             (unsigned long)HAL_GetTick(), i, payload[i], LORA_BEACON_PROTOCOL::WAKE_ACK[i]);
+             (unsigned long)HAL_GetTick(),
+             i,
+             payload[i],
+             LORA_BEACON_PROTOCOL::WAKE_ACK[i]);
 #endif
       return 0;
     }
