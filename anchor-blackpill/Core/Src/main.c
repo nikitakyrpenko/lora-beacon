@@ -61,8 +61,21 @@ volatile uint8_t DIO1_Callback_detected = 0;
 #define SX1280_WAKE_ACK_STEP_COUNT 3U  // SetPacketParams, WriteBuffer, SetTx -- see SX1280_Send_Wake_Ack() in SX1280Bridge.cpp
 #define SX1280_WAKE_ACK_FULL_MASK ((uint16_t)((1u << SX1280_WAKE_ACK_STEP_COUNT) - 1))
 
+// Mirrors SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE in SX1280Constants.hpp (Table 11-71) -- duplicated
+// here as plain hex since this is a C file and that header is C++-namespaced.
+#define RANGING_SLAVE_RESPONSE_DONE_BIT ((uint16_t)(1u << 7))
+
 static uint8_t ranging_active = 0;
 static uint32_t ranging_window_start_tick = 0;
+// Initialized from SX1280_Ranging_Window_Ms()'s compile-time default in main(); overwritten by each wake payload's
+// duration field afterward -- see SX1280_Check_Wake_Word_Matches().
+static uint32_t ranging_window_ms = 0;
+
+// Multi-anchor ACK collision avoidance (see PROTOCOL.md) -- deferred, non-blocking wait for this board's own
+// address-derived slot before actually sending the ACK / arming ranging mode.
+static uint8_t ack_slot_pending = 0;
+static uint32_t ack_slot_deadline_tick = 0;
+static uint32_t pending_ranging_window_ms = 0;
 
 /* USER CODE END PV */
 
@@ -78,6 +91,23 @@ static void MX_USART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+static void anchor_send_ack_and_arm_ranging(uint32_t window_ms)
+{
+  uint16_t wake_ack_mask = SX1280_Send_Wake_Ack();  // fire-and-forget TX; BUSY-gates the next SPI step
+  printf("[%lu] SX1280_Send_Wake_Ack mask=0x%X (full=0x%X)%s\r\n",
+         (unsigned long)HAL_GetTick(),
+         wake_ack_mask,
+         SX1280_WAKE_ACK_FULL_MASK,
+         (wake_ack_mask == SX1280_WAKE_ACK_FULL_MASK) ? " OK" : " INCOMPLETE");
+  uint16_t ranging_mode_mask = SX1280_Ranging_Slave_Mode();
+  if (ranging_mode_mask == SX1280_RANGING_MODE_FULL_MASK) {
+    ranging_active = 1;
+    ranging_window_ms = window_ms;
+    ranging_window_start_tick = HAL_GetTick();
+    printf("[%lu] entering RANGING\r\n", (unsigned long)ranging_window_start_tick);
+  }
+}
 
 /* USER CODE END 0 */
 
@@ -116,6 +146,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   SX1280_Create(&hspi3, BUSY_GPIO_Port, NSS_GPIO_Port, NRESET_GPIO_Port, TCXOEN_GPIO_Port, BUSY_Pin, NSS_Pin, NRESET_Pin, TCXOEN_Pin);
+  ranging_window_ms = SX1280_Ranging_Window_Ms();
   uint16_t radio_mode_mask = SX1280_Radio_mode();
   uint8_t radio_mode_enabled = (radio_mode_mask == SX1280_RADIO_MODE_FULL_MASK);
   if (radio_mode_enabled) {
@@ -134,26 +165,47 @@ int main(void)
     if (DIO1_Callback_detected) {
       DIO1_Callback_detected = 0;
       printf("[%lu] DIO1 callback fired (ranging_active=%u)\r\n", (unsigned long)HAL_GetTick(), ranging_active);
-      if (!ranging_active) {
-        uint16_t wake_word_match = SX1280_Check_Wake_Word_Matches();
+      if (!ranging_active && !ack_slot_pending) {
+        uint32_t received_window_ms = 0;
+        uint16_t wake_word_match = SX1280_Check_Wake_Word_Matches(&received_window_ms);
         if (wake_word_match) {
-          printf("[%lu] DIO1 callback: wake word matched, switching to slave mode\r\n", (unsigned long)HAL_GetTick());
-          uint16_t wake_ack_mask = SX1280_Send_Wake_Ack();  // fire-and-forget TX; BUSY-gates the next SPI step
-          printf("[%lu] SX1280_Send_Wake_Ack mask=0x%X (full=0x%X)%s\r\n",
-                 (unsigned long)HAL_GetTick(),
-                 wake_ack_mask,
-                 SX1280_WAKE_ACK_FULL_MASK,
-                 (wake_ack_mask == SX1280_WAKE_ACK_FULL_MASK) ? " OK" : " INCOMPLETE");
-          uint16_t ranging_mode_mask = SX1280_Ranging_Slave_Mode();
-          if (ranging_mode_mask == SX1280_RANGING_MODE_FULL_MASK) {
-            ranging_active = 1;
-            ranging_window_start_tick = HAL_GetTick();
-            printf("[%lu] entering RANGING\r\n", (unsigned long)ranging_window_start_tick);
+          uint32_t slot_delay_ms = SX1280_Ack_Slot_Delay_Ms();
+          if (slot_delay_ms == 0) {
+            printf("[%lu] DIO1 callback: wake word matched (ranging window %lums, slot 0), switching to slave mode\r\n",
+                   (unsigned long)HAL_GetTick(), (unsigned long)received_window_ms);
+            anchor_send_ack_and_arm_ranging(received_window_ms);
+          } else {
+            pending_ranging_window_ms = received_window_ms;
+            ack_slot_deadline_tick = HAL_GetTick() + slot_delay_ms;
+            ack_slot_pending = 1;
+            printf("[%lu] DIO1 callback: wake word matched (ranging window %lums), deferring ack by %lums\r\n",
+                   (unsigned long)HAL_GetTick(), (unsigned long)received_window_ms, (unsigned long)slot_delay_ms);
           }
         } else {
           printf("[%lu] DIO1 callback: wake word check returned no-match\r\n", (unsigned long)HAL_GetTick());
         }
+      } else if (ranging_active) {
+        // Early-exit check (see PROTOCOL.md step 7): a DIO1 fire while ranging_active means either
+        // RangingMasterRequestValid (exchange still in progress, ignore) or RangingSlaveResponseDone (exchange
+        // complete -- exit to idle immediately instead of waiting out the rest of the window).
+        uint16_t ranging_irq = SX1280_Get_Irq_Status_Raw(NULL, NULL);
+        SX1280_Clear_Irq_Status_Raw();
+        if (ranging_irq & RANGING_SLAVE_RESPONSE_DONE_BIT) {
+          uint16_t radio_mode_mask_reentry = SX1280_Radio_mode();
+          radio_mode_enabled = (radio_mode_mask_reentry == SX1280_RADIO_MODE_FULL_MASK);
+          ranging_active = 0;
+          printf("[%lu] ranging response done, exiting RANGING early\r\n", (unsigned long)HAL_GetTick());
+          if (radio_mode_enabled) {
+            printf("[%lu] entering RADIO\r\n", (unsigned long)HAL_GetTick());
+          }
+        }
       }
+    }
+
+    if (ack_slot_pending && !ranging_active && HAL_GetTick() >= ack_slot_deadline_tick) {
+      ack_slot_pending = 0;
+      printf("[%lu] ack slot reached, switching to slave mode\r\n", (unsigned long)HAL_GetTick());
+      anchor_send_ack_and_arm_ranging(pending_ranging_window_ms);
     }
 
     {
@@ -166,7 +218,17 @@ int main(void)
       }
     }
 
-    if (ranging_active && (HAL_GetTick() - ranging_window_start_tick >= SX1280_Ranging_Window_Ms())) {
+    {
+      static uint32_t busy_poll_last_tick = 0;
+      if (HAL_GetTick() - busy_poll_last_tick >= 1000) {
+        busy_poll_last_tick = HAL_GetTick();
+        GPIO_PinState busy_raw_level = HAL_GPIO_ReadPin(BUSY_GPIO_Port, BUSY_Pin);
+        printf("[%lu] raw BUSY pin level (GPIO read only, no SPI) = %s\r\n",
+               (unsigned long)HAL_GetTick(), busy_raw_level == GPIO_PIN_SET ? "HIGH" : "LOW");
+      }
+    }
+
+    if (ranging_active && (HAL_GetTick() - ranging_window_start_tick >= ranging_window_ms)) {
       uint16_t radio_mode_mask_reentry = SX1280_Radio_mode();
       radio_mode_enabled = (radio_mode_mask_reentry == SX1280_RADIO_MODE_FULL_MASK);
       ranging_active = 0;

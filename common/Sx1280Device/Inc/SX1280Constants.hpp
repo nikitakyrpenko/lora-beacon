@@ -118,6 +118,23 @@ static constexpr uint16_t REG_RANGING_MASTER_TARGET_ADDR = 0x0912;  // 4 bytes M
 static constexpr uint16_t REG_RANGING_SLAVE_OWN_ADDR = 0x0916;      // 4 bytes MSB-first through 0x0919, Table 13-56 (anchor/slave only)
 static constexpr uint16_t REG_RANGING_ADDR_CHECK_LEN = 0x0931;      // bits[7:6]: 0x0=8bit, 0x1=16bit, 0x2=24bit, 0x3=32bit (Table 13-57)
 static constexpr uint16_t REG_RANGING_CALIBRATION = 0x092C;         // 2 bytes MSB-first through 0x092D, RxTx delay offset
+// Empirically derived (datasheet gives no per-SF/BW numeric table, and RadioLib's SX128x driver doesn't implement
+// ranging calibration either -- both checked before resorting to this).
+//
+// Round 1: two known-distance samples with calibration=0 (5m -> raw 3381, 2.5m -> raw 3365) suggested a ~3354
+// constant-offset model, which turned out wrong -- the register is NOT 1:1 with the RangingResult count domain.
+// Round 2: calibration=3354 at 2.5m only reduced raw 3365 -> ~2500 (not the expected ~3354 drop); scale factor
+// ~0.258 raw-result-counts per register unit from that pair.
+// Round 3: calibration=13000 at 2.5m reduced it further to raw ~130 (still high vs target ~12.5 for 250cm true).
+// Slope across 0->3354->13000 is fairly consistent (~-0.258, ~-0.246), so extrapolating ~0.25: needed further
+// reduction (130-12.5)/0.25 ~= 470 more register units -> 13000+470 ~= 13470.
+// Round 4: with calibration=13470, distance PROPORTIONALITY is now correct (doubling/halving true distance
+// doubles/halves the reading) -- the earlier non-obvious scale-factor problem is resolved. What's left is a
+// residual near-constant additive offset: 2.5m true -> ~950cm (offset ~700cm), 5m true -> ~1200cm (offset ~700cm),
+// close range -> ~650cm (offset ~620cm, less precise since "close" wasn't an exact measured distance). The 2.5m/5m
+// estimates agree closely (~700cm = 35 raw counts still to remove). At ~0.25 raw-counts-per-register-unit:
+// 35/0.25 ~= 140 more units -> 13470+140 = 13610.
+static constexpr uint16_t RANGING_CALIBRATION_VALUE = 13610;
 static constexpr uint16_t REG_RANGING_RESULT_MUX = 0x0924;          // bits[5:4] select result type, see RANGING_RESULT_* below
 static constexpr uint16_t REG_RANGING_RESULT_MSB = 0x0961;          // 3 bytes MSB-first through 0x0963
 static constexpr uint16_t REG_LORA_MEM_CLOCK_ENABLE = 0x097F;       // read-modify-write bit 1, required before reading a ranging result
@@ -153,6 +170,11 @@ static constexpr uint8_t LONG_PREAMBLE_ENABLE = 0x01;
 // namespaces above. Shared verbatim between anchor and rover (once rover exists).
 namespace LORA_BEACON_PROTOCOL {
 static constexpr uint8_t WAKE_WORD[2] = {0xBE, 0xAC};
+// Full wake payload: WAKE_WORD magic (2 bytes) + a rover-supplied ranging-window duration in ms (2 bytes,
+// MSB-first, up to 65535ms) -- the anchor arms its ARMED-window timer from this received value instead of its own
+// compile-time RANGING_WINDOW_MS constant, per the planned runtime-config step (see memory
+// ranging_window_runtime_config.md / PLAN.md Open Items) now that basic wake/ack/ranging works end to end.
+static constexpr uint8_t WAKE_PAYLOAD_LEN = static_cast<uint8_t>(sizeof(WAKE_WORD) + sizeof(uint16_t));
 // Anchor's reply to a matched wake word, confirming it heard the wake-up and is arming for ranging.
 static constexpr uint8_t WAKE_ACK[2] = {0xAC, 0x4B};
 // Full ack payload: WAKE_ACK magic (2 bytes) + the responding anchor's own 4-byte ranging address, MSB-first, so
@@ -160,12 +182,27 @@ static constexpr uint8_t WAKE_ACK[2] = {0xAC, 0x4B};
 // than WAKE_WORD, so unlike the original plain-magic ack, this needs its own SetPacketParams (payload length 6)
 // on both the anchor's TX side and the beacon's RX side -- it can no longer just reuse the wake exchange's params.
 static constexpr uint8_t WAKE_ACK_PAYLOAD_LEN = static_cast<uint8_t>(sizeof(WAKE_ACK) + sizeof(uint32_t));
-// Beacon's software fallback ceiling for the ack wait -- first-pass value, not hardware-validated. The chip's own
-// SetRx timeout for the ack listen (see SX1280_Listen_For_Ack()) is set shorter than this, so this is only a
-// backstop in case DIO1 is somehow missed, same role as the ranging-phase's own fallback ceiling.
-static constexpr uint32_t WAKE_ACK_WINDOW_MS = 150;
-// Fixed, shared compile-time constant for initial anchor+rover bring-up -- first-pass value, NOT
-// hardware-validated yet. Planned to become a rover-supplied runtime value (carried in the wake payload)
-// once basic wake/range exchanges are confirmed working -- see PLAN.md Open Items.
+// Beacon's software fallback ceiling for the WHOLE ACK collect phase (SX1280_Listen_For_Ack() is continuous RX,
+// not a single-shot listen -- this bounds the total time spent collecting, not one individual catch). First-pass
+// value, not hardware-validated; sized to comfortably exceed EXPECTED_ANCHOR_COUNT * ANCHOR_ACK_SLOT_WIDTH_MS.
+static constexpr uint32_t COLLECT_PHASE_CEILING_MS = 150;
+// Matches physical anchor count for this bring-up phase -- hardcoded the same way target addresses were
+// originally hardcoded, not a general discovery mechanism (see PROTOCOL.md).
+static constexpr uint8_t EXPECTED_ANCHOR_COUNT = 3;
+// Default/fallback value -- also what the beacon currently sends in the wake payload's duration field (nothing
+// tunes it per-cycle yet, but it no longer has to match a compile-time constant baked into the anchor separately).
 static constexpr uint32_t RANGING_WINDOW_MS = 2000;
+// The wake payload's duration field arrives over radio untrusted -- RxDone doesn't guarantee a valid packet, and
+// even a well-formed one could in principle carry a nonsense value. The anchor clamps into this range before
+// arming any timer with it, rather than trusting the received value blindly.
+static constexpr uint32_t RANGING_WINDOW_MIN_MS = 500;
+static constexpr uint32_t RANGING_WINDOW_MAX_MS = 10000;
+// Multi-anchor ACK collision avoidance (see PROTOCOL.md): each anchor delays its ACK by a slot derived from its
+// own already-unique ANCHOR_RANGING_ADDRESS, purely locally -- no runtime coordination with the beacon needed,
+// since both boards compile against these same shared constants. Without staggering, multiple anchors ACK at the
+// same instant and collide on-air.
+static constexpr uint32_t RANGING_ADDRESS_BLOCK_BASE = 0x00000A19;
+// First-pass, not hardware-validated -- must exceed ACK airtime (~1-2ms at SF7/BW1625 for 6 bytes) plus
+// SPI/BUSY-turnaround jitter.
+static constexpr uint32_t ANCHOR_ACK_SLOT_WIDTH_MS = 20;
 }  // namespace LORA_BEACON_PROTOCOL

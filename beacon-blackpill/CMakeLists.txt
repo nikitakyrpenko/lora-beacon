@@ -64,6 +64,8 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
+    DEBUG_PINS       # SX1280Bridge.cpp: per-step SPI hal/cmd_status/busy print on every execute_step() call
+    DEBUG_PIN_TRACE  # SX1280Device.cpp: prints every GPIO_Pin (BUSY/NSS/NRESET/TCXOEN) level change
 )
 
 # Remove wrong libob.a library dependency when using cpp files

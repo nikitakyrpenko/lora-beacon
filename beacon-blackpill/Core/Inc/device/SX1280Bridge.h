@@ -25,6 +25,7 @@ uint16_t SX1280_Get_Irq_Status_Raw(uint8_t* hal_status_out, uint8_t* command_sta
 void SX1280_Clear_Irq_Status_Raw();
 void SX1280_Get_Status_Raw(uint8_t* circuit_mode_out, uint8_t* command_status_out);
 uint16_t SX1280_Listen_For_Ack();
+uint16_t SX1280_Stop_Ack_Listen();
 uint16_t SX1280_Check_Wake_Ack_Matches(uint32_t* anchor_address_out);
 uint16_t SX1280_Ranging_Master_Mode(uint32_t target_anchor_address);
 uint16_t SX1280_Send_Ranging_Request();

@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include "SX1280Bridge.h"
 #include "cmsis_gcc.h"
+#include "stm32h5xx_hal_gpio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -58,13 +59,24 @@ volatile uint8_t DIO1_Callback_detected = 0;
 #define SX1280_RANGING_MASTER_STEP_COUNT 10U
 #define SX1280_RANGING_MASTER_FULL_MASK ((uint16_t)((1u << SX1280_RANGING_MASTER_STEP_COUNT) - 1))
 
+#define SX1280_WAKE_BROADCAST_STEP_COUNT 2U  // WriteBuffer, SetTx -- see SX1280_Send_Wake_Broadcast() in SX1280Bridge.cpp
+#define SX1280_WAKE_BROADCAST_FULL_MASK ((uint16_t)((1u << SX1280_WAKE_BROADCAST_STEP_COUNT) - 1))
+
 /* Mirrors SX1280_VALUES::IRQ_BIT_RANGING_MASTER_{RESULT_VALID,TIMEOUT} in SX1280Constants.hpp (Table 11-71) --
  * duplicated here as plain hex since this is a C file and that header is C++-namespaced. */
 #define RANGING_MASTER_RESULT_VALID_BIT ((uint16_t)(1u << 9))
 #define RANGING_MASTER_TIMEOUT_BIT ((uint16_t)(1u << 10))
-/* Mirrors SX1280_VALUES::IRQ_BIT_RX_DONE and LORA_BEACON_PROTOCOL::WAKE_ACK_WINDOW_MS, same reason as above. */
-#define RX_DONE_BIT ((uint16_t)(1u << 1))
-#define WAKE_ACK_WINDOW_MS 150U
+/* Mirrors SX1280_VALUES::LORA_BEACON_PROTOCOL::COLLECT_PHASE_CEILING_MS/EXPECTED_ANCHOR_COUNT, same reason as
+ * above. During BEACON_COLLECTING, SX1280_Listen_For_Ack()'s irq mask only routes RX_DONE, so a DIO1 fire there
+ * can only mean a packet arrived -- no separate bit check needed. */
+#define COLLECT_PHASE_CEILING_MS 150U
+#define EXPECTED_ANCHOR_COUNT 3U
+
+typedef enum {
+  BEACON_IDLE,
+  BEACON_COLLECTING,
+  BEACON_RANGING,
+} BeaconState;
 
 /* USER CODE END PV */
 
@@ -117,21 +129,25 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   SX1280_Create(&hspi3, BUSY_GPIO_Port, NSS_GPIO_Port, NRESET_GPIO_Port, TCXOEN_GPIO_Port, BUSY_Pin, NSS_Pin, NRESET_Pin, TCXOEN_Pin);
-  uint16_t beacon_radio_mask = SX1280_Beacon_Radio();
+  uint16_t radio_result = SX1280_Beacon_Radio();
+
   printf("[%lu] SX1280_Beacon_Radio mask=0x%03X (full=0x%03X)%s\r\n",
          (unsigned long)HAL_GetTick(),
-         beacon_radio_mask,
+         radio_result,
          SX1280_BEACON_RADIO_FULL_MASK,
-         (beacon_radio_mask == SX1280_BEACON_RADIO_FULL_MASK) ? " OK" : " INCOMPLETE");
-  if (beacon_radio_mask == SX1280_BEACON_RADIO_FULL_MASK) {
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+         (radio_result == SX1280_BEACON_RADIO_FULL_MASK) ? " OK" : " INCOMPLETE");
+
+  if (radio_result == SX1280_BEACON_RADIO_FULL_MASK) {
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
   }
   // Initialized 5000ms in the past (not HAL_GetTick()) so the loop's own cadence check fires the first wake
   // broadcast immediately on entry, instead of special-casing an extra send here outside the loop.
   uint32_t wake_broadcast_last_tick = HAL_GetTick() - 5000;
-  uint8_t ack_pending = 0;
-  uint32_t ack_wait_start_tick = 0;
-  uint8_t ranging_pending = 0;
+  BeaconState beacon_state = BEACON_IDLE;
+  uint32_t collected_addresses[EXPECTED_ANCHOR_COUNT];
+  uint8_t collected_count = 0;
+  uint32_t collect_phase_deadline_tick = 0;
+  uint8_t ranging_index = 0;
   uint32_t ranging_request_sent_tick = 0;
   /* USER CODE END 2 */
 
@@ -141,69 +157,83 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    if (!ack_pending && !ranging_pending && (HAL_GetTick() - wake_broadcast_last_tick >= 5000)) {
+    if (beacon_state == BEACON_IDLE && (HAL_GetTick() - wake_broadcast_last_tick >= 5000)) {
       wake_broadcast_last_tick = HAL_GetTick();
-      SX1280_Send_Wake_Broadcast();
-      printf("[%lu] issuing wake broadcast (SetTx command sent, not yet confirmed)\r\n", (unsigned long)wake_broadcast_last_tick);
+      uint16_t wake_broadcast_mask = SX1280_Send_Wake_Broadcast();
+      printf("[%lu] sending wake broadcast mask=0x%X (full=0x%X)%s\r\n",
+             (unsigned long)wake_broadcast_last_tick,
+             wake_broadcast_mask,
+             SX1280_WAKE_BROADCAST_FULL_MASK,
+             (wake_broadcast_mask == SX1280_WAKE_BROADCAST_FULL_MASK) ? " OK" : " INCOMPLETE");
 
-      // Discard any stale flag/latch left over from the wake broadcast's own TxDone pulse before arming the ack
-      // listen -- DIO1 stays physically HIGH until the chip's IRQ status register is cleared (datasheet SS11.8.3),
-      // and EXTI is edge-triggered, so without this the ack's own RxDone/timeout produces no new rising edge and
-      // DIO1_Callback_detected never fires.
       DIO1_Callback_detected = 0;
       SX1280_Clear_Irq_Status_Raw();
+
       SX1280_Listen_For_Ack();
-      ack_wait_start_tick = HAL_GetTick();
-      ack_pending = 1;
+      printf("[%lu] collecting acks\r\n", (unsigned long)wake_broadcast_last_tick);
+
+      collected_count = 0;
+      collect_phase_deadline_tick = HAL_GetTick() + COLLECT_PHASE_CEILING_MS;
+      beacon_state = BEACON_COLLECTING;
     }
 
-    if (ack_pending) {
-      uint8_t ack_ceiling_elapsed = (HAL_GetTick() - ack_wait_start_tick) >= WAKE_ACK_WINDOW_MS;
-      if (DIO1_Callback_detected || ack_ceiling_elapsed) {
+    if (beacon_state == BEACON_COLLECTING) {
+      if (DIO1_Callback_detected) {
         DIO1_Callback_detected = 0;
+        SX1280_Clear_Irq_Status_Raw();  // every catch, not just once -- continuous RX keeps listening on its own
 
-        uint16_t ack_irq = SX1280_Get_Irq_Status_Raw(NULL, NULL);
-        SX1280_Clear_Irq_Status_Raw();
-
-        uint8_t ack_ok = 0;
         uint32_t learned_anchor_address = 0;
-        if (ack_irq & RX_DONE_BIT) {
-          ack_ok = (uint8_t)SX1280_Check_Wake_Ack_Matches(&learned_anchor_address);
+        if (SX1280_Check_Wake_Ack_Matches(&learned_anchor_address) && collected_count < EXPECTED_ANCHOR_COUNT) {
+          uint8_t already_have = 0;
+          for (uint8_t i = 0; i < collected_count; i++) {
+            if (collected_addresses[i] == learned_anchor_address) {
+              already_have = 1;
+              break;
+            }
+          }
+          if (!already_have) {
+            collected_addresses[collected_count] = learned_anchor_address;
+            collected_count++;
+            printf("[%lu] collected ack from anchor 0x%08lX (%u/%u)\r\n",
+                   (unsigned long)HAL_GetTick(),
+                   (unsigned long)learned_anchor_address,
+                   collected_count,
+                   EXPECTED_ANCHOR_COUNT);
+          }
         }
+      }
 
-        if (ack_ok) {
-          printf("[%lu] wake ack received from anchor 0x%08lX, arming ranging\r\n",
-                 (unsigned long)HAL_GetTick(), (unsigned long)learned_anchor_address);
+      if (collected_count >= EXPECTED_ANCHOR_COUNT || HAL_GetTick() >= collect_phase_deadline_tick) {
+        SX1280_Stop_Ack_Listen();
+        printf("[%lu] collect phase done, %u anchor(s) collected\r\n", (unsigned long)HAL_GetTick(), collected_count);
 
-          uint16_t ranging_master_mask = SX1280_Ranging_Master_Mode(learned_anchor_address);
+        if (collected_count == 0) {
+          SX1280_Beacon_Radio();
+          beacon_state = BEACON_IDLE;
+        }
+        else {
+          ranging_index = 0;
+          uint16_t ranging_master_mask = SX1280_Ranging_Master_Mode(collected_addresses[ranging_index]);
           if (ranging_master_mask == SX1280_RANGING_MASTER_FULL_MASK) {
-            // Same stale-latch discard as above, now for the ranging phase's own DIO1 events.
             DIO1_Callback_detected = 0;
             SX1280_Clear_Irq_Status_Raw();
             SX1280_Send_Ranging_Request();
             ranging_request_sent_tick = HAL_GetTick();
-            ranging_pending = 1;
+            beacon_state = BEACON_RANGING;
           }
           else {
             printf("[%lu] SX1280_Ranging_Master_Mode INCOMPLETE (mask=0x%03X full=0x%03X)\r\n",
                    (unsigned long)HAL_GetTick(),
                    ranging_master_mask,
                    SX1280_RANGING_MASTER_FULL_MASK);
-            // restore LoRa packet type + TxDone IRQ mapping for the next wake broadcast cycle
             SX1280_Beacon_Radio();
+            beacon_state = BEACON_IDLE;
           }
         }
-        else {
-          printf("[%lu] no wake ack (anchor not in range or missed wake word)\r\n", (unsigned long)HAL_GetTick());
-          // restore LoRa packet type + TxDone IRQ mapping for the next wake broadcast cycle
-          SX1280_Beacon_Radio();
-        }
-
-        ack_pending = 0;
       }
     }
 
-    if (ranging_pending) {
+    if (beacon_state == BEACON_RANGING) {
       // 1100ms is a fallback ceiling only (a bit more than the 1000ms SetTx timeout) in case DIO1 is somehow
       // missed -- a normal exchange resolves via the interrupt within low single-digit ms of the chip deciding
       // RangingMasterResultValid or RangingMasterTimeout, not after this full window.
@@ -214,25 +244,63 @@ int main(void)
         uint16_t ranging_irq = SX1280_Get_Irq_Status_Raw(NULL, NULL);
         SX1280_Clear_Irq_Status_Raw();
 
+        uint32_t ranged_address = collected_addresses[ranging_index];
         if (ranging_irq & RANGING_MASTER_RESULT_VALID_BIT) {
           int32_t distance_cm = 0;
           if (SX1280_Read_Ranging_Result_Cm(&distance_cm)) {
-            printf("[%lu] ranging result: %ld cm\r\n", (unsigned long)HAL_GetTick(), (long)distance_cm);
+            printf("[%lu] anchor 0x%08lX ranging result: %ld cm\r\n",
+                   (unsigned long)HAL_GetTick(),
+                   (unsigned long)ranged_address,
+                   (long)distance_cm);
           }
           else {
-            printf("[%lu] ranging result: readback failed\r\n", (unsigned long)HAL_GetTick());
+            printf("[%lu] anchor 0x%08lX ranging result: readback failed\r\n", (unsigned long)HAL_GetTick(), (unsigned long)ranged_address);
           }
         }
         else if (ranging_irq & RANGING_MASTER_TIMEOUT_BIT) {
-          printf("[%lu] ranging request timed out (no anchor response)\r\n", (unsigned long)HAL_GetTick());
+          printf("[%lu] anchor 0x%08lX ranging request timed out\r\n", (unsigned long)HAL_GetTick(), (unsigned long)ranged_address);
         }
         else {
-          printf("[%lu] ranging request: no result (irq=0x%04X)\r\n", (unsigned long)HAL_GetTick(), ranging_irq);
+          printf("[%lu] anchor 0x%08lX ranging request: no result (irq=0x%04X)\r\n",
+                 (unsigned long)HAL_GetTick(),
+                 (unsigned long)ranged_address,
+                 ranging_irq);
         }
 
-        // restore LoRa packet type + TxDone IRQ mapping for the next wake broadcast cycle
-        SX1280_Beacon_Radio();
-        ranging_pending = 0;
+        ranging_index++;
+        if (ranging_index < collected_count) {
+          uint16_t ranging_master_mask = SX1280_Ranging_Master_Mode(collected_addresses[ranging_index]);
+          if (ranging_master_mask == SX1280_RANGING_MASTER_FULL_MASK) {
+            DIO1_Callback_detected = 0;
+            SX1280_Clear_Irq_Status_Raw();
+            SX1280_Send_Ranging_Request();
+            ranging_request_sent_tick = HAL_GetTick();
+            // stay in BEACON_RANGING for the next collected address
+          }
+          else {
+            printf("[%lu] SX1280_Ranging_Master_Mode INCOMPLETE (mask=0x%03X full=0x%03X)\r\n",
+                   (unsigned long)HAL_GetTick(),
+                   ranging_master_mask,
+                   SX1280_RANGING_MASTER_FULL_MASK);
+            SX1280_Beacon_Radio();
+            beacon_state = BEACON_IDLE;
+          }
+        }
+        else {
+          SX1280_Beacon_Radio();
+          beacon_state = BEACON_IDLE;
+        }
+      }
+    }
+
+    {
+      static uint32_t busy_poll_last_tick = 0;
+      if (HAL_GetTick() - busy_poll_last_tick >= 1000) {
+        busy_poll_last_tick = HAL_GetTick();
+        GPIO_PinState busy_raw_level = HAL_GPIO_ReadPin(BUSY_GPIO_Port, BUSY_Pin);
+        printf("[%lu] raw BUSY pin level (GPIO read only, no SPI) = %s\r\n",
+               (unsigned long)HAL_GetTick(),
+               busy_raw_level == GPIO_PIN_SET ? "HIGH" : "LOW");
       }
     }
 
