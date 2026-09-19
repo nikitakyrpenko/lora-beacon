@@ -34,6 +34,9 @@ option(DEBUG_PINS "Enable SX1280Bridge.cpp per-step SPI trace" OFF)
 # SX1280Device.cpp: prints every GPIO_Pin (BUSY/NSS/NRESET/TCXOEN) level change. Off by default -- same reason.
 option(DEBUG_PIN_TRACE "Enable SX1280Device.cpp per-GPIO-edge trace" OFF)
 
+# BeaconBridge.cpp: BEACON_LOG() diagnostics on/off. Override: cmake -B build -DDEBUG_BEACON=OFF ..
+option(DEBUG_BEACON "Enable BeaconBridge BEACON_LOG() diagnostics" ON)
+
 # Enable compile command to ease indexing with e.g. clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
@@ -67,6 +70,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
      Core/Src/device/SX1280Bridge.cpp
+     Core/Src/device/BeaconBridge.cpp
 )
 
 # Add include paths
@@ -79,6 +83,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
     $<$<BOOL:${DEBUG_PINS}>:DEBUG_PINS>
+    $<$<BOOL:${DEBUG_BEACON}>:DEBUG_BEACON>  # BeaconBridge.cpp: BEACON_LOG() diagnostics on/off
     BRINGUP_MODE=${BRINGUP_MODE}
 )
 
