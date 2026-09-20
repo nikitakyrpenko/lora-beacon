@@ -32,7 +32,7 @@ set(BRINGUP_MODE 0 CACHE STRING "SX1280 bring-up test mode (0/1/2)")
 option(DEBUG_PIN_TRACE "Enable SX1280Device.cpp per-GPIO-edge trace" OFF)
 
 # BeaconBridge.cpp: BEACON_LOG() diagnostics on/off. Override: cmake -B build -DDEBUG_BEACON=OFF ..
-option(DEBUG_BEACON "Enable BeaconBridge BEACON_LOG() diagnostics" ON)
+option(DEBUG_BEACON "Enable BeaconBridge BEACON_LOG() diagnostics" OFF)
 
 # Enable compile command to ease indexing with e.g. clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)

@@ -2,6 +2,7 @@
 #include <cstdint>
 
 #include "BeaconBridge.hpp"
+#include "ByteOrder.hpp"
 #include "SX1280Constants.hpp"
 #include "stm32h5xx_hal_def.h"
 
@@ -41,16 +42,6 @@ bool step_ok(HAL_StatusTypeDef hal, const SX1280Device::SX1280_Status& sta)
                            sta.command_status == SX1280Device::CommandStatus::COMMAND_TIMEOUT);
 }
 
-std::array<uint8_t, 6> make_address_register_write(uint16_t reg, uint32_t address)
-{
-  return {static_cast<uint8_t>(reg >> 8),
-          static_cast<uint8_t>(reg & 0xFF),
-          static_cast<uint8_t>(address >> 24),
-          static_cast<uint8_t>(address >> 16),
-          static_cast<uint8_t>(address >> 8),
-          static_cast<uint8_t>(address & 0xFF)};
-}
-
 }  // namespace
 
 HAL_StatusTypeDef BeaconBridge::get_status(SX1280Device::SX1280_Status* sta_out)
@@ -74,7 +65,7 @@ HAL_StatusTypeDef BeaconBridge::get_irq_mask(uint16_t* mask_out)
     return hal;
   }
 
-  *mask_out = (static_cast<uint16_t>(rx_irq[1]) << 8) | rx_irq[2];
+  *mask_out = ByteOrder::get_u16(&rx_irq[1]);
   return hal;
 }
 
@@ -414,7 +405,7 @@ uint16_t BeaconBridge::to_ranging_master(uint32_t target_anchor_address)
 
   // set the target anchor's ranging address
   hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE,
-                         make_address_register_write(SX1280_VALUES::REG_RANGING_MASTER_TARGET_ADDR, target_anchor_address).data(),
+                         ByteOrder::register_write_u32(SX1280_VALUES::REG_RANGING_MASTER_TARGET_ADDR, target_anchor_address).data(),
                          nullptr,
                          6,
                          &sta);
@@ -545,8 +536,7 @@ bool BeaconBridge::read_ranging_result_cm(int32_t* distance_out)
   }
   mask |= (1u << 4);
 
-  int32_t raw_result =
-    (static_cast<int32_t>(result_rx[3]) << 16) | (static_cast<int32_t>(result_rx[4]) << 8) | static_cast<int32_t>(result_rx[5]);
+  int32_t raw_result = static_cast<int32_t>(ByteOrder::get_u24(&result_rx[3]));
 
   // Restore the LoRa memory clock enable bit to its original
   uint8_t restore_clock_tx[3] = {static_cast<uint8_t>(SX1280_VALUES::REG_LORA_MEM_CLOCK_ENABLE >> 8),
@@ -596,8 +586,31 @@ void BeaconBridge::clear_irq()
   clear_irq_mask(&sta);
 }
 
+void BeaconBridge::finish_cycle()
+{
+  // anchors past ranged_count were never ranged: an earlier anchor's configuration failed and ended the pass
+  for (uint8_t i = ranged_count; i < collected_count; i++) {
+    measured[i] = RangeEntry{collected_anchors[i], -1, RangeStatus::FAILED};
+  }
+  frame_length = CycleFrame::Serialize(++cycle_counter, HAL_GetTick(), measured, collected_count, frame, sizeof(frame));
+}
+
+size_t BeaconBridge::take_frame(uint8_t* out, size_t capacity)
+{
+  if (frame_length == 0 || capacity < frame_length) {
+    return 0;
+  }
+  const size_t length = frame_length;
+  for (size_t i = 0; i < length; i++) {
+    out[i] = frame[i];
+  }
+  frame_length = 0;
+  return length;
+}
+
 void BeaconBridge::return_to_idle()
 {
+  finish_cycle();  // every path that ends a cycle comes through here
   to_radio();
   state = BeaconState::IDLE;
 }
@@ -630,6 +643,7 @@ void BeaconBridge::step(volatile uint8_t& dio1_flag)
     listen_for_ack();
 
     collected_count = 0;
+    ranged_count = 0;
     collect_phase_deadline_tick = HAL_GetTick() + LORA_BEACON_PROTOCOL::COLLECT_PHASE_CEILING_MS;
     state = BeaconState::COLLECTING;
   }
@@ -688,13 +702,22 @@ void BeaconBridge::step(volatile uint8_t& dio1_flag)
       get_irq_mask(&ranging_irq);
       clear_irq();
 
+      RangeEntry& entry = measured[ranging_index];
+      entry = RangeEntry{collected_anchors[ranging_index], -1, RangeStatus::FAILED};
       if (ranging_irq & SX1280_VALUES::IRQ_BIT_RANGING_MASTER_RESULT_VALID) {
         int32_t distance_cm = 0;
-        read_ranging_result_cm(&distance_cm);  // logs the result or the failing step itself
+        if (read_ranging_result_cm(&distance_cm)) {  // logs the result or the failing step itself
+          entry.distance_cm = distance_cm;
+          entry.status = RangeStatus::OK;
+        }
       }
       else {
+        if (ranging_irq & SX1280_VALUES::IRQ_BIT_RANGING_MASTER_TIMEOUT) {
+          entry.status = RangeStatus::TIMEOUT;
+        }
         log_ranging_no_result(ranging_irq);
       }
+      ranged_count = ranging_index + 1;
 
       // next collected anchor, or back to idle after the last one (or if its configuration failed)
       ranging_index++;

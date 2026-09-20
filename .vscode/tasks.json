@@ -21,7 +21,7 @@
     {
       "label": "STM32: build (beacon-blackpill)",
       "type": "shell",
-      "command": "cmake --preset Release -DBRINGUP_MODE=0 -DDEBUG_BEACON=ON && cmake --build --preset Release",
+      "command": "cmake --preset Release -DBRINGUP_MODE=0 -DDEBUG_BEACON=OFF && cmake --build --preset Release",
       "options": {
         "cwd": "${workspaceFolder}/beacon-blackpill"
       },

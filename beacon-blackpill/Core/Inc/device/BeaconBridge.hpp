@@ -3,6 +3,8 @@
 #include <cstdint>
 #include "SX1280Constants.hpp"
 #include "AckPacket.hpp"
+#include "CycleFrame.hpp"
+#include "RangeEntry.hpp"
 #include "SX1280Device.hpp"
 
 enum class MODE { RADIO, ACK_LISTEN, RANGING, NONE };
@@ -30,7 +32,16 @@ class BeaconBridge {
   uint32_t collect_phase_deadline_tick;
   uint32_t ranging_request_sent_tick;
 
+  // outcome of the cycle in progress, and the frame of the last finished one (see take_frame())
+  RangeEntry measured[LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT];  // filled as each anchor's exchange ends
+  uint8_t ranged_count;                                              // entries of measured[] filled so far this cycle
+  uint32_t cycle_counter;
+  uint8_t frame[CycleFrame::MAX_BYTES];
+  size_t frame_length;  // 0 = no finished cycle waiting to be taken
+
   void clear_irq();
+  // build the UART frame of the finished cycle into `frame`
+  void finish_cycle();
   // back to wake-broadcast radio config, ready for the next cycle
   void return_to_idle();
   // configure as ranging master for one anchor and fire the request; false if the configuration didn't complete
@@ -65,6 +76,11 @@ public:
     , wake_broadcast_last_tick(HAL_GetTick() - WAKE_BROADCAST_INTERVAL_MS)
     , collect_phase_deadline_tick(0)
     , ranging_request_sent_tick(0)
+    , measured{}
+    , ranged_count(0)
+    , cycle_counter(0)
+    , frame{}
+    , frame_length(0)
   {
     device.NRESET_reset();
   }
@@ -92,6 +108,12 @@ public:
   // Advances the wake -> collect acks -> range cycle by one pass; call it every main-loop iteration. `dio1_flag` is the
   // flag the DIO1 EXTI callback sets -- consumed and cleared here.
   void step(volatile uint8_t& dio1_flag);
+
+  // Copies the UART frame of the last finished cycle into `out` (layout in CycleFrame.hpp) and returns its length, once per
+  // finished cycle; 0 if no cycle finished since the previous call (or `capacity` is too small, the frame then stays for
+  // the next call). If the caller is too slow and a second cycle finishes first, the older frame is overwritten -- the
+  // cycle counter in the frame shows the gap.
+  size_t take_frame(uint8_t* out, size_t capacity);
 
   inline MODE get_mode() { return mode; }
   inline BeaconState get_state() { return state; }

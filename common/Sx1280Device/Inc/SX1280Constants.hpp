@@ -242,7 +242,7 @@ static constexpr uint8_t WAKE_ACK_PAYLOAD_LEN = static_cast<uint8_t>(sizeof(WAKE
 static constexpr uint32_t COLLECT_PHASE_CEILING_MS = 150;
 // Matches physical anchor count for this bring-up phase -- hardcoded the same way target addresses were
 // originally hardcoded, not a general discovery mechanism (see PROTOCOL.md).
-static constexpr uint8_t EXPECTED_ANCHOR_COUNT = 3;
+static constexpr uint8_t EXPECTED_ANCHOR_COUNT = 1;
 // Default/fallback value -- also what the beacon currently sends in the wake payload's duration field (nothing
 // tunes it per-cycle yet, but it no longer has to match a compile-time constant baked into the anchor separately).
 static constexpr uint32_t RANGING_WINDOW_MS = 2000;

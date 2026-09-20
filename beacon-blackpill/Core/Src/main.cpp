@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <cstdint>
 #include "BeaconBridge.hpp"
+#include "CycleFrame.hpp"
 #include "SX1280BringUp.hpp"
 #include "cmsis_gcc.h"
 #include "stm32h5xx_hal_gpio.h"
@@ -236,6 +237,7 @@ int main(void)
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
   }
 
+  uint8_t cycle_frame[CycleFrame::MAX_BYTES];
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -245,6 +247,14 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     beacon_bridge.step(DIO1_Callback_detected);
+
+    // a whole wake -> collect -> range pass finished: flush its frame (layout in CycleFrame.hpp). This is the beacon's actual
+    // output, not logging, so it is on in every build regardless of DEBUG_BEACON. Blocking is fine here: the pass is over
+    // and the next wake broadcast is seconds away.
+    const size_t cycle_frame_length = beacon_bridge.take_frame(cycle_frame, sizeof(cycle_frame));
+    if (cycle_frame_length > 0) {
+      HAL_UART_Transmit(&huart1, cycle_frame, static_cast<uint16_t>(cycle_frame_length), 100);
+    }
     __WFI();
   }
 #endif  // BRINGUP_MODE

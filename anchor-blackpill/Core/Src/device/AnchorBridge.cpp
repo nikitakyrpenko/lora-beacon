@@ -3,6 +3,7 @@
 
 #include "AckPacket.hpp"
 #include "AnchorBridge.hpp"
+#include "ByteOrder.hpp"
 #include "SX1280Constants.hpp"
 #include "stm32h5xx_hal_def.h"
 
@@ -50,16 +51,6 @@ bool step_ok(HAL_StatusTypeDef hal, const SX1280Device::SX1280_Status& sta)
   return hal == HAL_OK &&
          (sta.command_status == SX1280Device::CommandStatus::COMMAND_SUCCESS ||
           sta.command_status == SX1280Device::CommandStatus::RESERVED || sta.command_status == SX1280Device::CommandStatus::DATA_AVAILABLE);
-}
-
-std::array<uint8_t, 6> make_address_register_write(uint16_t reg, uint32_t address)
-{
-  return {static_cast<uint8_t>(reg >> 8),
-          static_cast<uint8_t>(reg & 0xFF),
-          static_cast<uint8_t>(address >> 24),
-          static_cast<uint8_t>(address >> 16),
-          static_cast<uint8_t>(address >> 8),
-          static_cast<uint8_t>(address & 0xFF)};
 }
 
 }  // namespace
@@ -305,7 +296,7 @@ uint16_t AnchorBridge::to_ranging_slave()
 
   // set this anchor's own ranging address
   hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE,
-                         make_address_register_write(SX1280_VALUES::REG_RANGING_SLAVE_OWN_ADDR, ANCHOR_RANGING_ADDRESS).data(),
+                         ByteOrder::register_write_u32(SX1280_VALUES::REG_RANGING_SLAVE_OWN_ADDR, ANCHOR_RANGING_ADDRESS).data(),
                          nullptr,
                          6,
                          &sta);
@@ -565,7 +556,7 @@ bool AnchorBridge::wake_word_matched()
 
   //fetch duration of ranging mode
   const uint8_t* duration_bytes = &payload_start[WAKE_WORD_LEN];
-  uint32_t duration_ms = (static_cast<uint32_t>(duration_bytes[0]) << 8) | static_cast<uint32_t>(duration_bytes[1]);
+  uint32_t duration_ms = ByteOrder::get_u16(duration_bytes);
 
   // untrusted (arrived over radio) -- clamp into a safe range before it's ever used to arm a timer, rather
   // than rejecting it and leaving ranging_window_duration_ms stale
@@ -606,7 +597,7 @@ HAL_StatusTypeDef AnchorBridge::get_irq_mask(uint16_t* mask_out)
     return hal;
   }
 
-  *mask_out = (static_cast<uint16_t>(rx_irq[1]) << 8) | rx_irq[2];
+  *mask_out = ByteOrder::get_u16(&rx_irq[1]);
   return hal;
 }
 
