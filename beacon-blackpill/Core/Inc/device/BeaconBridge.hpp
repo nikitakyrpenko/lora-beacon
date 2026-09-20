@@ -91,7 +91,13 @@ public:
 
   uint16_t listen_for_ack();
   uint16_t stop_ack_listen();
-  bool wake_ack_matched(AckPacket* ack_out);
+  // Starts the ack-listen RX again with just SetRx (packet params and IRQ mask stay configured). The timeout-active RX drops
+  // back to STDBY_RC after every received packet, so it must be re-armed to hear the next anchor's ack.
+  uint16_t rearm_ack_listen();
+  // Reads and validates the ack in the RX buffer. With rearm_listen the ack listen is re-armed (rearm_ack_listen()) as soon as the
+  // buffer has been read, BEFORE any validation or logging: the next anchor's ack can already be on its way, and UART logging
+  // between here and the re-arm can easily cost as much as the gap between two acks.
+  bool wake_ack_matched(AckPacket* ack_out, bool rearm_listen = false);
 
   uint16_t to_ranging_master(uint32_t target_anchor_address);
   uint16_t send_ranging_request();

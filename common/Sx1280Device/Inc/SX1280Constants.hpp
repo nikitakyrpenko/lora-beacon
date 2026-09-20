@@ -242,7 +242,7 @@ static constexpr uint8_t WAKE_ACK_PAYLOAD_LEN = static_cast<uint8_t>(sizeof(WAKE
 static constexpr uint32_t COLLECT_PHASE_CEILING_MS = 150;
 // Matches physical anchor count for this bring-up phase -- hardcoded the same way target addresses were
 // originally hardcoded, not a general discovery mechanism (see PROTOCOL.md).
-static constexpr uint8_t EXPECTED_ANCHOR_COUNT = 1;
+static constexpr uint8_t EXPECTED_ANCHOR_COUNT = 2;
 // Default/fallback value -- also what the beacon currently sends in the wake payload's duration field (nothing
 // tunes it per-cycle yet, but it no longer has to match a compile-time constant baked into the anchor separately).
 static constexpr uint32_t RANGING_WINDOW_MS = 2000;
@@ -314,9 +314,10 @@ static constexpr uint8_t TX_DONE_IRQ_MASK[8] = {static_cast<uint8_t>(SX1280_VALU
 static constexpr uint8_t TX_SINGLE_SHOT_PARAMS[3] = {SX1280_VALUES::PERIOD_BASE_1_MS, 0x00, 0x00};
 
 // Beacon's ack-collect RX: timeout-active (not continuous) -- reverted to this after continuous RX regressed ack
-// reception (last known-good at commit 9ba7c83). Per the datasheet this mode still reports RxDone for each
-// incoming packet and restarts its own timer on each one, so it still gathers multiple anchors' ACKs; this chip-side
-// ceiling sits inside COLLECT_PHASE_CEILING_MS as a fallback, not the primary bound.
+// reception (last known-good at commit 9ba7c83). Per the datasheet (SetRx, Rx behaviours) this mode returns to STDBY_RC
+// after EVERY received packet as well as at end-of-count, so it does not keep listening for further anchors' ACKs by
+// itself: BeaconBridge re-arms it with SetRx (rearm_ack_listen()) after each ack. This chip-side window sits inside
+// COLLECT_PHASE_CEILING_MS as a fallback, not the primary bound.
 static constexpr uint16_t ACK_LISTEN_TIMEOUT_MS = 100;
 static constexpr uint8_t ACK_LISTEN_RX_PARAMS[3] = {
   SX1280_VALUES::PERIOD_BASE_1_MS, static_cast<uint8_t>(ACK_LISTEN_TIMEOUT_MS >> 8), static_cast<uint8_t>(ACK_LISTEN_TIMEOUT_MS & 0xFF)};

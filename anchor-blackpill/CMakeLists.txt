@@ -26,7 +26,7 @@ set(CMAKE_PROJECT_NAME anchor-blackpill)
 
 # Bring-up test mode: 0 = production, 1 = board-level bring-up, 2 = module-level bring-up.
 # Override at configure time: cmake -B build -DBRINGUP_MODE=2 ..
-set(BRINGUP_MODE 0 CACHE STRING "SX1280 bring-up test mode (0/1/2)")
+set(BRINGUP_MODE 2 CACHE STRING "SX1280 bring-up test mode (0/1/2)")
 
 # AnchorBridge.cpp: ANCHOR_LOG() diagnostics on/off. Override: cmake -B build -DDEBUG_ANCHOR=ON ..
 option(DEBUG_ANCHOR "Enable AnchorBridge ANCHOR_LOG() diagnostics" ON)

@@ -4,7 +4,7 @@
     {
       "label": "STM32: build (anchor-blackpill)",
       "type": "shell",
-      "command": "cmake --preset Release -DBRINGUP_MODE=0 -DDEBUG_ANCHOR=ON -DANCHOR_ADDRESS=0x00000A19 -DANCHOR_X_CM=100 -DANCHOR_Y_CM=-50 -DANCHOR_Z_CM=150 && cmake --build --preset Release",
+      "command": "cmake --preset Release -DBRINGUP_MODE=0 -DDEBUG_ANCHOR=ON -DANCHOR_ADDRESS=0x00000A19 -DANCHOR_X_CM=1 -DANCHOR_Y_CM=-2 -DANCHOR_Z_CM=2 && cmake --build --preset Release",
       "options": {
         "cwd": "${workspaceFolder}/anchor-blackpill"
       },
@@ -16,12 +16,16 @@
         "reveal": "always",
         "panel": "dedicated",
         "clear": true
-      }
+      },
+      "dependsOn": [
+        "STM32: clean build directory (anchor-blackpill)"
+      ],
+      "dependsOrder": "sequence"
     },
     {
       "label": "STM32: build (beacon-blackpill)",
       "type": "shell",
-      "command": "cmake --preset Release -DBRINGUP_MODE=0 -DDEBUG_BEACON=OFF && cmake --build --preset Release",
+      "command": "cmake --preset Release -DBRINGUP_MODE=0 -DDEBUG_BEACON=ON && cmake --build --preset Release",
       "options": {
         "cwd": "${workspaceFolder}/beacon-blackpill"
       },
@@ -33,7 +37,11 @@
         "reveal": "always",
         "panel": "dedicated",
         "clear": true
-      }
+      },
+      "dependsOn": [
+        "STM32: clean build directory (beacon-blackpill)"
+      ],
+      "dependsOrder": "sequence"
     },
     {
       "label": "STM32: clean build directory (anchor-blackpill)",

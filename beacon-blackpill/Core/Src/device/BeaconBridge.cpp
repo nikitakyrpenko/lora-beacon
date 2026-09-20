@@ -251,6 +251,22 @@ uint16_t BeaconBridge::listen_for_ack()
   return mask;
 }
 
+uint16_t BeaconBridge::rearm_ack_listen()
+{
+  uint16_t mask = 0;
+  SX1280Device::SX1280_Status sta{};
+
+  const HAL_StatusTypeDef hal =
+    device.SPI_write(&SX1280_OPERATIONS::SET_RX_OP_CODE, LORA_BEACON_PROTOCOL::ACK_LISTEN_RX_PARAMS, nullptr, 3, &sta);
+  if (!step_ok(hal, sta)) {
+    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    return mask;
+  }
+  mask |= (1u << 0);
+
+  return mask;
+}
+
 uint16_t BeaconBridge::stop_ack_listen()
 {
   mode = MODE::NONE;
@@ -271,9 +287,14 @@ uint16_t BeaconBridge::stop_ack_listen()
   return mask;
 }
 
-bool BeaconBridge::wake_ack_matched(AckPacket* ack_out)
+bool BeaconBridge::wake_ack_matched(AckPacket* ack_out, bool rearm_listen)
 {
   SX1280Device::SX1280_Status sta{};
+  auto rearm_now = [&]() {
+    if (rearm_listen) {
+      rearm_ack_listen();
+    }
+  };
 
   constexpr uint8_t BUFF_STA_SIZE = 3;
   uint8_t tx_buff_sta[BUFF_STA_SIZE] = {};
@@ -282,6 +303,7 @@ bool BeaconBridge::wake_ack_matched(AckPacket* ack_out)
   // read RX buffer status -> length + start
   HAL_StatusTypeDef hal = device.SPI_write(&SX1280_OPERATIONS::READ_BUFFER_STATUS_OP_CODE, tx_buff_sta, rx_buff_sta, BUFF_STA_SIZE, &sta);
   if (!step_ok(hal, sta)) {
+    rearm_now();
     BEACON_LOG("[%lu] wake_ack_matched: buffer status read failed, hal=%d cmd_status=%d busy=%d\r\n",
                (unsigned long)HAL_GetTick(),
                static_cast<int>(hal),
@@ -296,6 +318,7 @@ bool BeaconBridge::wake_ack_matched(AckPacket* ack_out)
   // shorter or longer than an ack -> not ours
   constexpr uint8_t PAYLOAD_LEN = LORA_BEACON_PROTOCOL::WAKE_ACK_PAYLOAD_LEN;
   if (len != PAYLOAD_LEN) {
+    rearm_now();
     BEACON_LOG("[%lu] wake_ack_matched: unexpected payload len=%u (expected %u)\r\n", (unsigned long)HAL_GetTick(), len, PAYLOAD_LEN);
     return false;
   }
@@ -310,6 +333,7 @@ bool BeaconBridge::wake_ack_matched(AckPacket* ack_out)
   // read the received payload
   hal = device.SPI_write(&SX1280_OPERATIONS::READ_BUFFER_OP_CODE, tx_buff_read, rx_buff_read, static_cast<uint16_t>(BUFF_READ_SIZE), &sta);
   if (!step_ok(hal, sta)) {
+    rearm_now();
     BEACON_LOG("[%lu] wake_ack_matched: payload read failed, hal=%d cmd_status=%d busy=%d\r\n",
                (unsigned long)HAL_GetTick(),
                static_cast<int>(hal),
@@ -318,17 +342,25 @@ bool BeaconBridge::wake_ack_matched(AckPacket* ack_out)
     return false;
   }
 
+  // the payload is safely in rx_buff_read now: the RX buffer may be overwritten from here on
+  rearm_now();
+
   const uint8_t* payload = &rx_buff_read[BUFFER_OFFSET_SIZE];
   constexpr uint8_t MAGIC_LEN = sizeof(LORA_BEACON_PROTOCOL::WAKE_ACK);
 
   // check the ack magic matches
   for (uint8_t i = 0; i < MAGIC_LEN; ++i) {
     if (payload[i] != LORA_BEACON_PROTOCOL::WAKE_ACK[i]) {
-      BEACON_LOG("[%lu] wake_ack_matched: magic mismatch at byte %u got=0x%02X want=0x%02X\r\n",
+      BEACON_LOG("[%lu] wake_ack_matched: magic mismatch at byte %u got=0x%02X want=0x%02X (buffer start=%u, first bytes %02X %02X %02X %02X)\r\n",
                  (unsigned long)HAL_GetTick(),
                  i,
                  payload[i],
-                 LORA_BEACON_PROTOCOL::WAKE_ACK[i]);
+                 LORA_BEACON_PROTOCOL::WAKE_ACK[i],
+                 static_cast<unsigned>(beg),
+                 payload[0],
+                 payload[1],
+                 payload[2],
+                 payload[3]);
       return false;
     }
   }
@@ -650,34 +682,55 @@ void BeaconBridge::step(volatile uint8_t& dio1_flag)
 
   // COLLECTING: gather one ack per anchor until enough have answered or the collect phase runs out
   if (state == BeaconState::COLLECTING) {
-    // ack-listen's irq mask only routes RX_DONE so a DIO1 fire here means a packet arrived
+    // The ack-listen IRQ mask routes two things to DIO1: RX_DONE (an ack arrived) and RX_TX_TIMEOUT (the chip-side listen
+    // window ran out with nothing more received). Read the IRQ status to tell them apart before touching the buffer -- after a
+    // timeout there is no packet in it, only whatever was there before (e.g. our own wake payload).
+    bool rx_timed_out = false;
     if (dio1_flag) {
       dio1_flag = 0;
-      clear_irq();  // every catch, not just once -- RX keeps listening on its own
 
-      AckPacket learned_anchor{};
-      if (wake_ack_matched(&learned_anchor) && collected_count < LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT) {
-        bool already_have = false;
-        for (uint8_t i = 0; i < collected_count; i++) {
-          if (collected_anchors[i].anchor_id == learned_anchor.anchor_id) {
-            already_have = true;
-            break;
+      uint16_t rx_irq = 0;
+      if (get_irq_mask(&rx_irq) != HAL_OK) {
+        rx_irq = SX1280_VALUES::IRQ_BIT_RX_DONE;  // status unreadable: fall back to trying to parse a packet
+      }
+      clear_irq();  // every catch, not just once
+
+      if (rx_irq & SX1280_VALUES::IRQ_BIT_RX_DONE) {
+        AckPacket learned_anchor{};
+        // Re-armed inside, right after the buffer read (see wake_ack_matched): the timeout-active RX returns to STDBY_RC after every
+        // received packet (datasheet, SetRx). If this ack completes the set, stop_ack_listen() below cancels the re-armed RX.
+        const bool more_expected = collected_count < LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT;
+        if (wake_ack_matched(&learned_anchor, more_expected) && more_expected) {
+          bool already_have = false;
+          for (uint8_t i = 0; i < collected_count; i++) {
+            if (collected_anchors[i].anchor_id == learned_anchor.anchor_id) {
+              already_have = true;
+              break;
+            }
+          }
+          if (!already_have) {
+            collected_anchors[collected_count] = learned_anchor;
+            collected_count++;
+            BEACON_LOG("[%lu] collected anchor 0x%08lX (%u/%u)\r\n",
+                       (unsigned long)HAL_GetTick(),
+                       (unsigned long)learned_anchor.anchor_id,
+                       static_cast<unsigned>(collected_count),
+                       static_cast<unsigned>(LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT));
+          }
+          else {
+            BEACON_LOG("[%lu] ack from anchor 0x%08lX ignored, already collected -- do two anchors share an address?\r\n",
+                       (unsigned long)HAL_GetTick(),
+                       (unsigned long)learned_anchor.anchor_id);
           }
         }
-        if (!already_have) {
-          collected_anchors[collected_count] = learned_anchor;
-          collected_count++;
-          BEACON_LOG("[%lu] collected anchor 0x%08lX (%u/%u)\r\n",
-                     (unsigned long)HAL_GetTick(),
-                     (unsigned long)learned_anchor.anchor_id,
-                     static_cast<unsigned>(collected_count),
-                     static_cast<unsigned>(LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT));
-        }
+      }
+      if (rx_irq & SX1280_VALUES::IRQ_BIT_RX_TX_TIMEOUT) {
+        rx_timed_out = true;  // nobody else is going to answer: no reason to wait for the collect-phase ceiling
       }
     }
 
-    // if anchor count is enough switch to ranging protocol
-    if (collected_count >= LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT || HAL_GetTick() >= collect_phase_deadline_tick) {
+    // if anchor count is enough, or the listen window ran out, switch to ranging protocol
+    if (collected_count >= LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT || rx_timed_out || HAL_GetTick() >= collect_phase_deadline_tick) {
       stop_ack_listen();
       BEACON_LOG(
         "[%lu] collect phase done, %u anchor(s) collected\r\n", (unsigned long)HAL_GetTick(), static_cast<unsigned>(collected_count));
