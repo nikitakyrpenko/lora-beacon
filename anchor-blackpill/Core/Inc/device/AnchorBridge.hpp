@@ -11,7 +11,13 @@ class AnchorBridge {
   SX1280Device device;
   MODE mode;
   ACK_STATE ack_state;
+
   uint32_t ranging_window_duration_ms;
+  uint32_t ack_slot_deadline_tick;
+  uint32_t ranging_window_start_tick;
+
+  // send the pending ack, then switch to ranging slave and start the ranging window
+  void send_ack_and_start_ranging(volatile uint8_t& dio1_flag);
 
 public:
   AnchorBridge(SPI_HandleTypeDef* SPI_port_,
@@ -28,6 +34,8 @@ public:
     , mode(MODE::NONE)
     , ack_state(ACK_STATE::IDLE)
     , ranging_window_duration_ms(LORA_BEACON_PROTOCOL::RANGING_WINDOW_MS)
+    , ack_slot_deadline_tick(0)
+    , ranging_window_start_tick(0)
   {
     device.NRESET_reset();
   }
@@ -51,6 +59,10 @@ public:
 
   uint32_t get_ack_delay_ms();
   uint32_t get_ranging_duration_ms();
+
+  // Advances the wake -> ack -> ranging-slave cycle by one pass; call it every main-loop iteration. `dio1_flag` is the flag
+  // the DIO1 EXTI callback sets -- consumed and cleared here.
+  void step(volatile uint8_t& dio1_flag);
 
   inline MODE get_mode() { return mode; }
   inline ACK_STATE get_ack_state() { return ack_state; }

@@ -14,10 +14,6 @@
 #define BEACON_LOG(...)
 #endif
 
-// hal: HAL_OK=0, HAL_ERROR=1, HAL_BUSY=2, HAL_TIMEOUT=3 (stm32*_hal_def.h). SPI_write() returns HAL_TIMEOUT only from
-// its leading BUSY_wait() (chip never released BUSY -- not powered/responding at all), and HAL_ERROR only from
-// NSS_begin()/NSS_end() finding NSS already in the wrong state before it toggles. sta stays zero-initialized in both of
-// those early-return cases (SPI_write only writes *out on HAL_OK). Uses __func__, so expand it inside the failing method.
 #define BEACON_LOG_STEP_FAIL(hal, sta, mask)                                                \
   BEACON_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n", \
              (unsigned long)HAL_GetTick(),                                                  \
@@ -28,7 +24,7 @@
              static_cast<int>((sta).busy),                                                  \
              mask)
 
-// Bitmask a multi-step method returns when every one of its SPI steps succeeded (bit i == step i)
+// Bitmask a multi-step method returns success results
 static constexpr uint16_t TO_RADIO_FULL_MASK = (1u << 9) - 1;
 static constexpr uint16_t SEND_WAKE_BROADCAST_FULL_MASK = (1u << 2) - 1;
 static constexpr uint16_t LISTEN_FOR_ACK_FULL_MASK = (1u << 3) - 1;
@@ -591,5 +587,120 @@ void BeaconBridge::log_ranging_no_result(uint16_t irq_mask)
                (unsigned long)HAL_GetTick(),
                (unsigned long)ranging_target_address,
                irq_mask);
+  }
+}
+
+void BeaconBridge::clear_irq()
+{
+  SX1280Device::SX1280_Status sta{};
+  clear_irq_mask(&sta);
+}
+
+void BeaconBridge::return_to_idle()
+{
+  to_radio();
+  state = BeaconState::IDLE;
+}
+
+bool BeaconBridge::start_ranging(uint32_t anchor_address, volatile uint8_t& dio1_flag)
+{
+  to_ranging_master(anchor_address);
+
+  if (mode != MODE::RANGING) {
+    return false;
+  }
+  dio1_flag = 0;
+  clear_irq();
+
+  send_ranging_request();
+  ranging_request_sent_tick = HAL_GetTick();
+  return true;
+}
+
+void BeaconBridge::step(volatile uint8_t& dio1_flag)
+{
+  // IDLE: broadcast the wake request, then listen for acks
+  if (state == BeaconState::IDLE && (HAL_GetTick() - wake_broadcast_last_tick >= WAKE_BROADCAST_INTERVAL_MS)) {
+    wake_broadcast_last_tick = HAL_GetTick();
+    send_wake_broadcast();
+
+    dio1_flag = 0;  // the TX_DONE edge of the broadcast isn't an ack
+    clear_irq();
+
+    listen_for_ack();
+
+    collected_count = 0;
+    collect_phase_deadline_tick = HAL_GetTick() + LORA_BEACON_PROTOCOL::COLLECT_PHASE_CEILING_MS;
+    state = BeaconState::COLLECTING;
+  }
+
+  // COLLECTING: gather one ack per anchor until enough have answered or the collect phase runs out
+  if (state == BeaconState::COLLECTING) {
+    // ack-listen's irq mask only routes RX_DONE so a DIO1 fire here means a packet arrived
+    if (dio1_flag) {
+      dio1_flag = 0;
+      clear_irq();  // every catch, not just once -- RX keeps listening on its own
+
+      AckPacket learned_anchor{};
+      if (wake_ack_matched(&learned_anchor) && collected_count < LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT) {
+        bool already_have = false;
+        for (uint8_t i = 0; i < collected_count; i++) {
+          if (collected_anchors[i].anchor_id == learned_anchor.anchor_id) {
+            already_have = true;
+            break;
+          }
+        }
+        if (!already_have) {
+          collected_anchors[collected_count] = learned_anchor;
+          collected_count++;
+          BEACON_LOG("[%lu] collected anchor 0x%08lX (%u/%u)\r\n",
+                     (unsigned long)HAL_GetTick(),
+                     (unsigned long)learned_anchor.anchor_id,
+                     static_cast<unsigned>(collected_count),
+                     static_cast<unsigned>(LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT));
+        }
+      }
+    }
+
+    // if anchor count is enough switch to ranging protocol
+    if (collected_count >= LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT || HAL_GetTick() >= collect_phase_deadline_tick) {
+      stop_ack_listen();
+      BEACON_LOG(
+        "[%lu] collect phase done, %u anchor(s) collected\r\n", (unsigned long)HAL_GetTick(), static_cast<unsigned>(collected_count));
+
+      ranging_index = 0;
+      if (collected_count > 0 && start_ranging(collected_anchors[ranging_index].anchor_id, dio1_flag)) {
+        state = BeaconState::RANGING;
+      }
+      else {
+        return_to_idle();
+      }
+    }
+  }
+
+  // RANGING: one anchor at a time; each exchange ends on DIO1 callback or timeout
+  if (state == BeaconState::RANGING) {
+    const bool ceiling_elapsed = (HAL_GetTick() - ranging_request_sent_tick) >= RANGING_RESULT_CEILING_MS;
+    if (dio1_flag || ceiling_elapsed) {
+      dio1_flag = 0;
+
+      uint16_t ranging_irq = 0;
+      get_irq_mask(&ranging_irq);
+      clear_irq();
+
+      if (ranging_irq & SX1280_VALUES::IRQ_BIT_RANGING_MASTER_RESULT_VALID) {
+        int32_t distance_cm = 0;
+        read_ranging_result_cm(&distance_cm);  // logs the result or the failing step itself
+      }
+      else {
+        log_ranging_no_result(ranging_irq);
+      }
+
+      // next collected anchor, or back to idle after the last one (or if its configuration failed)
+      ranging_index++;
+      if (ranging_index >= collected_count || !start_ranging(collected_anchors[ranging_index].anchor_id, dio1_flag)) {
+        return_to_idle();
+      }
+    }
   }
 }

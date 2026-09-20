@@ -26,11 +26,8 @@ set(CMAKE_PROJECT_NAME beacon-blackpill)
 
 # Bring-up test mode: 0 = production, 1 = board-level bring-up, 2 = module-level bring-up.
 # Override at configure time: cmake -B build -DBRINGUP_MODE=2 ..
-set(BRINGUP_MODE 2 CACHE STRING "SX1280 bring-up test mode (0/1/2)")
+set(BRINGUP_MODE 0 CACHE STRING "SX1280 bring-up test mode (0/1/2)")
 
-# SX1280Bridge.cpp: per-step SPI hal/cmd_status/busy print on every execute_step() call. Off by default -- too
-# noisy for normal use. Override: cmake -B build -DDEBUG_PINS=ON ..
-option(DEBUG_PINS "Enable SX1280Bridge.cpp per-step SPI trace" OFF)
 # SX1280Device.cpp: prints every GPIO_Pin (BUSY/NSS/NRESET/TCXOEN) level change. Off by default -- same reason.
 option(DEBUG_PIN_TRACE "Enable SX1280Device.cpp per-GPIO-edge trace" OFF)
 
@@ -69,7 +66,6 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
-     Core/Src/device/SX1280Bridge.cpp
      Core/Src/device/BeaconBridge.cpp
 )
 
@@ -82,7 +78,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
-    $<$<BOOL:${DEBUG_PINS}>:DEBUG_PINS>
     $<$<BOOL:${DEBUG_BEACON}>:DEBUG_BEACON>  # BeaconBridge.cpp: BEACON_LOG() diagnostics on/off
     BRINGUP_MODE=${BRINGUP_MODE}
 )

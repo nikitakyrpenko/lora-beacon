@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdio>
 #include "AnchorBridge.hpp"
+#include "SX1280BringUp.hpp"
 #include "cmsis_gcc.h"
 #include "stm32h5xx_hal_def.h"
 #include "stm32h5xx_hal_gpio.h"
@@ -37,6 +38,15 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+// Permanent hardware bring-up test (see test.md). Reflash with the desired mode, run, read UART @ 115200 8N1, reflash
+// back to 0 for deployment. Set via CMake: -DBRINGUP_MODE=n.
+// 0 = normal production anchor logic
+// 1 = board-level bring-up: GPIO/UART/SPI3 checks only, the SX1280 module need not be attached
+// 2 = module-level bring-up: SX1280 chip checks driven through AnchorBridge only; the module must be attached
+#ifndef BRINGUP_MODE
+#define BRINGUP_MODE 0
+#endif
 
 /* USER CODE END PD */
 
@@ -55,18 +65,6 @@ UART_HandleTypeDef huart1;
 
 volatile uint8_t DIO1_Callback_detected = 0;
 
-#define SX1280_RADIO_MODE_STEP_COUNT 9U  // duty cycling disabled for now -- see AnchorBridge::to_radio() in AnchorBridge.cpp
-#define SX1280_RADIO_MODE_FULL_MASK ((uint16_t)((1u << SX1280_RADIO_MODE_STEP_COUNT) - 1))
-
-// Mirrors SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE in SX1280Constants.hpp (Table 11-71) -- duplicated
-// here as plain hex since this is a C file and that header is C++-namespaced.
-#define RANGING_SLAVE_RESPONSE_DONE_BIT ((uint16_t)(1u << 7))
-
-static uint32_t ranging_window_start_tick = 0;
-// Multi-anchor ACK collision avoidance (see PROTOCOL.md) -- tick deadline for the deferred-ack wait; the
-// pending/idle state itself lives on AnchorBridge (ack_state), this is just main-loop scheduling state.
-static uint32_t ack_slot_deadline_tick = 0;
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -81,6 +79,60 @@ static void MX_USART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+#if BRINGUP_MODE == 2
+// Anchor-specific module-level checks (4/5 and 5/5). Checks 1-3, the board-level test and the final summary are shared with
+// the beacon: common/Sx1280Device/Inc/SX1280BringUp.hpp. Everything here goes through AnchorBridge's public API, so every
+// SPI transfer takes the real BUSY-gated path.
+
+// 4/5: independent corroboration through different opcodes than check 3. to_radio() sends 9 commands ending in SetRx; the chip
+// must then report circuit_mode RX (5) via GetStatus, which needs both directions of the SPI link to work. Don't trust
+// to_radio()'s own mask alone: it accepts a status of 0, so an all-zero MISO can look like success there.
+static bool bringup_check_command_roundtrip(AnchorBridge& bridge)
+{
+  const uint16_t mask = bridge.to_radio();
+  printf("[%lu]   to_radio mask=0x%03X (full=0x1FF) get_mode()=%s\r\n",
+         (unsigned long)HAL_GetTick(),
+         mask,
+         bridge.get_mode() == MODE::RADIO ? "RADIO" : "NONE");
+
+  SX1280Device::SX1280_Status sta{};
+  const HAL_StatusTypeDef hal = bridge.get_status(&sta);
+  const bool ok = (hal == HAL_OK) && (sta.circuit_mode == SX1280Device::CircuitMode::RX);
+  if (hal != HAL_OK) {
+    printf("[%lu]   GetStatus after to_radio failed: hal=%d\r\n", (unsigned long)HAL_GetTick(), static_cast<int>(hal));
+  }
+  else {
+    printf(
+      "[%lu]   after SetRx: circuit_mode=%u (expect 5 = RX)\r\n", (unsigned long)HAL_GetTick(), static_cast<unsigned>(sta.circuit_mode));
+  }
+  if (!ok) {
+    printf("[%lu]   the chip did not take the configuration (MOSI/SCK/NSS path) or its status is unreadable (MISO)\r\n",
+           (unsigned long)HAL_GetTick());
+  }
+  SX1280BringUp::Report(4, "command round-trip (SetRx -> RX)", ok);
+  return ok;
+}
+
+// 5/5: DIO1 / EXTI, self-contained: send_ranging_slave_ack() routes TX_DONE to DIO1 and transmits, so the chip raises a real
+// DIO1 rising edge that must reach DIO1_Callback_detected through the actual EXTI callback / NVIC path. No RF partner is
+// needed, but it does put one short ack packet on air. It can't detect a DIO1 that is already stuck HIGH (no edge).
+static bool bringup_check_dio1(AnchorBridge& bridge)
+{
+  DIO1_Callback_detected = 0;
+  const uint16_t mask = bridge.send_ranging_slave_ack();
+  printf("[%lu]   send_ranging_slave_ack mask=0x%X (full=0xF)\r\n", (unsigned long)HAL_GetTick(), mask);
+
+  // the ack's own TX_DONE poll already ran inside; allow slack for the EXTI path
+  const bool ok = SX1280BringUp::WaitForFlag(&DIO1_Callback_detected, 100);
+  if (!ok) {
+    printf("[%lu]   no DIO1 edge after the ack's TX_DONE: chip not raising DIO1, the DIO1 wire, or the EXTI/NVIC path\r\n",
+           (unsigned long)HAL_GetTick());
+  }
+  SX1280BringUp::Report(5, "DIO1 / EXTI (TX_DONE)", ok);
+  return ok;
+}
+#endif  // BRINGUP_MODE == 2
 
 /* USER CODE END 0 */
 
@@ -122,50 +174,63 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
-#ifndef BRINGUP_MODE
-#define BRINGUP_MODE 2
+#if BRINGUP_MODE != 0
+  // pinout shared by the anchor and the beacon Blackpill boards
+  static const SX1280BringUp::BoardPins bringup_pins{NSS_GPIO_Port,
+                                                     NSS_Pin,
+                                                     NRESET_GPIO_Port,
+                                                     NRESET_Pin,
+                                                     TCXOEN_GPIO_Port,
+                                                     TCXOEN_Pin,
+                                                     LED_GPIO_Port,
+                                                     LED_Pin,
+                                                     BUSY_GPIO_Port,
+                                                     BUSY_Pin,
+                                                     DIO1_GPIO_Port,
+                                                     DIO1_Pin};
 #endif
 
-#if BRINGUP_MODE == 0
+#if BRINGUP_MODE == 1
+  // Board-level bring-up (test.md layer 1): shared with the beacon, never returns. The SX1280 module need not be attached.
+  SX1280BringUp::RunBoardLevel(bringup_pins, &hspi3, &DIO1_Callback_detected);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1) {
     /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
-    HAL_GPIO_TogglePin(TCXOEN_GPIO_Port, TCXOEN_Pin);
-    HAL_GPIO_TogglePin(NSS_GPIO_Port, NSS_Pin);
-    HAL_GPIO_TogglePin(NRESET_GPIO_Port, NRESET_Pin);
-    printf("[BRINGUP_MODE 0] BOARD-BRINGUP: <TCXOEN> = %s, <NSS> = %s, <NRESET> = %s, probe now\r\n",
-           HAL_GPIO_ReadPin(TCXOEN_GPIO_Port, TCXOEN_Pin) == GPIO_PIN_SET ? "HIGH" : "LOW",
-           HAL_GPIO_ReadPin(NSS_GPIO_Port, NSS_Pin) == GPIO_PIN_SET ? "HIGH" : "LOW",
-           HAL_GPIO_ReadPin(NRESET_GPIO_Port, NRESET_Pin) == GPIO_PIN_SET ? "HIGH" : "LOW");
-
-    const GPIO_PinState BUSY_read = HAL_GPIO_ReadPin(BUSY_GPIO_Port, BUSY_Pin);
-    printf("[BRINGUP_MODE 0] BOARD-BRINGUP: <BUSY> = %s\r\n", BUSY_read == GPIO_PIN_SET ? "HIGH" : "LOW");
-
-    const GPIO_PinState DIO1_read = HAL_GPIO_ReadPin(DIO1_GPIO_Port, DIO1_Pin);
-    printf("[BRINGUP_MODE 0] BOARD-BRINGUP: <DIO1> = %s\r\n", DIO1_read == GPIO_PIN_SET ? "HIGH" : "LOW");
-
-    if (DIO1_Callback_detected) {
-      DIO1_Callback_detected = 0;
-      printf("[BRINGUP_MODE 0] BOARD-BRINGUP: DIO1 EXTI fired!\r\n");
-    }
-
-    uint8_t tx[1] = {0x1};
-    uint8_t rx[1] = {0};
-    const HAL_StatusTypeDef sta = HAL_SPI_TransmitReceive(&hspi3, tx, rx, 1, HAL_MAX_DELAY);
-    printf("[BRINGUP_MODE 0] BOARD-BRINGUP: SPI loopback <HAL> = %u, sent=0x%02X recv=0x%02X %s\r\n",
-           sta,
-           tx[0],
-           rx[0],
-           (tx[0] == rx[0]) ? "MATCH" : "MISMATCH");
-
-    HAL_Delay(5000);
   }
-#elif BRINGUP_MODE == 1
+#elif BRINGUP_MODE == 2
+  // Module-level bring-up (test.md layer 2): SX1280 chip checks through AnchorBridge, the module must be attached.
+  printf("[%lu] BRING-UP: anchor address 0x%08lX, position (%d, %d, %d) cm\r\n",
+         (unsigned long)HAL_GetTick(),
+         (unsigned long)ANCHOR_ADDRESS,
+         static_cast<int>(ANCHOR_X_CM),
+         static_cast<int>(ANCHOR_Y_CM),
+         static_cast<int>(ANCHOR_Z_CM));  // cross-check against the board's physical label
+
+  uint16_t bringup_mask = 0;
+  if (SX1280BringUp::CheckIdleGpioState(bringup_pins)) {  // before the bridge exists: its constructor resets the chip
+    bringup_mask |= SX1280BringUp::BIT_GPIO_IDLE;
+  }
+
+  static AnchorBridge anchor_bridge(
+    &hspi3, BUSY_GPIO_Port, NSS_GPIO_Port, NRESET_GPIO_Port, TCXOEN_GPIO_Port, BUSY_Pin, NSS_Pin, NRESET_Pin, TCXOEN_Pin);
+
+  if (SX1280BringUp::CheckResetBusyLow(bringup_pins)) {
+    bringup_mask |= SX1280BringUp::BIT_RESET;
+  }
+  if (SX1280BringUp::CheckChipAlive(anchor_bridge)) {
+    bringup_mask |= SX1280BringUp::BIT_CHIP_ALIVE;
+  }
+  if (bringup_check_command_roundtrip(anchor_bridge)) {
+    bringup_mask |= SX1280BringUp::BIT_COMMAND_ROUNDTRIP;
+  }
+  if (bringup_check_dio1(anchor_bridge)) {
+    bringup_mask |= SX1280BringUp::BIT_DIO1;
+  }
+
+  SX1280BringUp::Finish(bringup_pins, bringup_mask);  // prints the summary, LED pass/fail, never returns
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -191,60 +256,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    if (DIO1_Callback_detected) {
-      DIO1_Callback_detected = 0;
-
-      if (anchor_bridge.get_mode() == MODE::RANGING) {
-        uint16_t irq_mask = 0;
-        anchor_bridge.get_irq_mask(&irq_mask);
-
-        SX1280Device::SX1280_Status sta{};
-        anchor_bridge.clear_irq_mask(&sta);
-
-        // check irq mask for RANGING_SLAVE_RESPONSE_DONE_BIT -> slave transmition done -> switch to radio early
-        if (irq_mask & RANGING_SLAVE_RESPONSE_DONE_BIT) {
-          anchor_bridge.to_radio();
-        }
-        else {
-          anchor_bridge.log_ranging_irq_unmatched(irq_mask);
-        }
-      }
-      // recieved wake word but ack is not sent yet -> exaust ack delay  and switch to ranging
-      else if (anchor_bridge.get_ack_state() == ACK_STATE::IDLE && anchor_bridge.wake_word_matched()) {
-        uint32_t slot_delay_ms = anchor_bridge.get_ack_delay_ms();
-        // sent ack and switch to ranging
-        if (slot_delay_ms == 0) {
-          anchor_bridge.send_ranging_slave_ack();
-          // send_ranging_slave_ack()'s blocking TX_DONE poll can catch a real DIO1 edge that this flag never
-          // saw -- clear it so to_ranging_slave()'s first real event isn't misread as already-pending
-          DIO1_Callback_detected = 0;
-          anchor_bridge.to_ranging_slave();
-
-          if (anchor_bridge.get_mode() == MODE::RANGING) {
-            ranging_window_start_tick = HAL_GetTick();
-          }
-        }
-        //start ack delay timer
-        else {
-          ack_slot_deadline_tick = HAL_GetTick() + slot_delay_ms;
-        }
-      }
-    }
-
-    if (anchor_bridge.get_ack_state() == ACK_STATE::PENDING && HAL_GetTick() >= ack_slot_deadline_tick) {
-      anchor_bridge.send_ranging_slave_ack();
-      DIO1_Callback_detected = 0;
-      anchor_bridge.to_ranging_slave();
-      if (anchor_bridge.get_mode() == MODE::RANGING) {
-        ranging_window_start_tick = HAL_GetTick();
-      }
-    }
-
-    // switch to radio since ranging closed
-    if (anchor_bridge.get_mode() == MODE::RANGING &&
-        (HAL_GetTick() - ranging_window_start_tick >= anchor_bridge.get_ranging_duration_ms())) {
-      anchor_bridge.to_radio();
-    }
+    anchor_bridge.step(DIO1_Callback_detected);
   }
 #endif  // BRINGUP_MODE
   /* USER CODE END 3 */

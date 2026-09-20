@@ -625,3 +625,60 @@ uint32_t AnchorBridge::get_ranging_duration_ms()
 {
   return ranging_window_duration_ms;
 }
+
+void AnchorBridge::send_ack_and_start_ranging(volatile uint8_t& dio1_flag)
+{
+  send_ranging_slave_ack();
+  // send_ranging_slave_ack()'s blocking TX_DONE poll can catch a real DIO1 edge that the flag never saw -- clear it so
+  // to_ranging_slave()'s first real event isn't misread as already-pending
+  dio1_flag = 0;
+  to_ranging_slave();
+
+  if (mode == MODE::RANGING) {
+    ranging_window_start_tick = HAL_GetTick();
+  }
+}
+
+void AnchorBridge::step(volatile uint8_t& dio1_flag)
+{
+  if (dio1_flag) {
+    dio1_flag = 0;
+
+    if (mode == MODE::RANGING) {
+      uint16_t irq_mask = 0;
+      get_irq_mask(&irq_mask);
+
+      SX1280Device::SX1280_Status sta{};
+      clear_irq_mask(&sta);
+
+      // RANGING_SLAVE_RESPONSE_DONE -> the slave response has been transmitted -> switch back to radio early
+      if (irq_mask & SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE) {
+        to_radio();
+      }
+      else {
+        log_ranging_irq_unmatched(irq_mask);
+      }
+    }
+    // received wake word but the ack is not sent yet -> wait out this anchor's ack slot, then switch to ranging
+    else if (ack_state == ACK_STATE::IDLE && wake_word_matched()) {
+      const uint32_t slot_delay_ms = get_ack_delay_ms();
+      if (slot_delay_ms == 0) {
+        send_ack_and_start_ranging(dio1_flag);
+      }
+      // start the ack delay timer
+      else {
+        ack_slot_deadline_tick = HAL_GetTick() + slot_delay_ms;
+      }
+    }
+  }
+
+  // ack slot reached
+  if (ack_state == ACK_STATE::PENDING && HAL_GetTick() >= ack_slot_deadline_tick) {
+    send_ack_and_start_ranging(dio1_flag);
+  }
+
+  // switch to radio since the ranging window closed
+  if (mode == MODE::RANGING && (HAL_GetTick() - ranging_window_start_tick >= ranging_window_duration_ms)) {
+    to_radio();
+  }
+}

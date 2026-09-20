@@ -38,7 +38,7 @@ struct AckPacket {
 private:
   static void put_i16(uint8_t* out, int16_t value)
   {
-    const uint16_t raw = static_cast<uint16_t>(value);  // two's complement bits, sign handled by the cast
+    const uint16_t raw = static_cast<uint16_t>(value);
     out[0] = static_cast<uint8_t>(raw >> 8);
     out[1] = static_cast<uint8_t>(raw & 0xFF);
   }
