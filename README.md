@@ -135,3 +135,7 @@ Anchor:
 [88789] entering RADIO
 ```
 Timestamps are ms since boot. The beacon example shows ranging timeouts (open issue, see PROTOCOL.md).
+
+## Further development
+- **Payload encryption.** Wake and ack payloads are plain today, so anchor positions can be read and the wake can be replayed. Encrypt and authenticate them in firmware (the SX1280 has no AES engine), with a per-cycle counter or nonce against replay and a key stored per device.
+- **Ranging calibration.** The RxTx-delay register (13610) is an offset tuned by hand at two distances, and close range returns 0 cm. Measure at known distances (1 m, 2.5 m, 5 m), fit the offset per anchor and beacon pair, keep it per anchor instead of one constant, and consider averaging several results per anchor.
