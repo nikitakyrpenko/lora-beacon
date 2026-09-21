@@ -2,132 +2,9 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "STM32: build (bridge)",
-      "type": "shell",
-      "command": "cmake --preset Debug && cmake --build --preset Debug",
-      "options": {
-        "cwd": "${workspaceFolder}/bridge"
-      },
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      },
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      }
-    },
-    {
-      "label": "STM32: clean build directory (bridge)",
-      "type": "shell",
-      "command": "rm -rf build",
-      "options": {
-        "cwd": "${workspaceFolder}/bridge"
-      },
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      }
-    },
-    {
-      "label": "STM32: kill stray debug processes (bridge)",
-      "type": "shell",
-      "command": "pkill -f st-util; pkill -f gdb-multiarch; true",
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "silent",
-        "panel": "dedicated",
-        "clear": false
-      }
-    },
-    {
-      "label": "STM32: flash (bridge)",
-      "type": "shell",
-      "command": "arm-none-eabi-objcopy -O binary build/Debug/bridge.elf build/Debug/bridge.bin && st-flash write build/Debug/bridge.bin 0x08000000 && st-flash reset",
-      "options": {
-        "cwd": "${workspaceFolder}/bridge"
-      },
-      "dependsOn": [
-        "STM32: build (bridge)"
-      ],
-      "dependsOrder": "sequence",
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      }
-    },
-    {
-      "label": "STM32: build (beacon)",
-      "type": "shell",
-      "command": "cmake --preset Debug && cmake --build --preset Debug",
-      "options": {
-        "cwd": "${workspaceFolder}/beacon"
-      },
-      "group": "build",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      }
-    },
-    {
-      "label": "STM32: clean build directory (beacon)",
-      "type": "shell",
-      "command": "rm -rf build",
-      "options": {
-        "cwd": "${workspaceFolder}/beacon"
-      },
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      }
-    },
-    {
-      "label": "STM32: kill stray debug processes (beacon)",
-      "type": "shell",
-      "command": "pkill -f st-util; pkill -f gdb-multiarch; true",
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "silent",
-        "panel": "dedicated",
-        "clear": false
-      }
-    },
-    {
-      "label": "STM32: flash (beacon)",
-      "type": "shell",
-      "command": "arm-none-eabi-objcopy -O binary build/Debug/beacon.elf build/Debug/beacon.bin && st-flash write build/Debug/beacon.bin 0x08000000 && st-flash reset",
-      "options": {
-        "cwd": "${workspaceFolder}/beacon"
-      },
-      "dependsOn": [
-        "STM32: build (beacon)"
-      ],
-      "dependsOrder": "sequence",
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      }
-    },
-    {
       "label": "STM32: build (anchor-blackpill)",
       "type": "shell",
-      "command": "cmake --preset Debug && cmake --build --preset Debug",
+      "command": "cmake --preset Release -DBRINGUP_MODE=0 -DDEBUG_ANCHOR=ON -DANCHOR_ADDRESS=0x00000A19 -DANCHOR_X_CM=1 -DANCHOR_Y_CM=-2 -DANCHOR_Z_CM=2 && cmake --build --preset Release",
       "options": {
         "cwd": "${workspaceFolder}/anchor-blackpill"
       },
@@ -139,7 +16,32 @@
         "reveal": "always",
         "panel": "dedicated",
         "clear": true
-      }
+      },
+      "dependsOn": [
+        "STM32: clean build directory (anchor-blackpill)"
+      ],
+      "dependsOrder": "sequence"
+    },
+    {
+      "label": "STM32: build (beacon-blackpill)",
+      "type": "shell",
+      "command": "cmake --preset Release -DBRINGUP_MODE=0 -DDEBUG_BEACON=ON && cmake --build --preset Release",
+      "options": {
+        "cwd": "${workspaceFolder}/beacon-blackpill"
+      },
+      "group": "build",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "dependsOn": [
+        "STM32: clean build directory (beacon-blackpill)"
+      ],
+      "dependsOrder": "sequence"
     },
     {
       "label": "STM32: clean build directory (anchor-blackpill)",
@@ -149,34 +51,6 @@
         "cwd": "${workspaceFolder}/anchor-blackpill"
       },
       "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      }
-    },
-    {
-      "label": "STM32: kill stray debug processes (anchor-blackpill)",
-      "type": "shell",
-      "command": "pkill -f st-util; pkill -f gdb-multiarch; true",
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "silent",
-        "panel": "dedicated",
-        "clear": false
-      }
-    },
-    {
-      "label": "STM32: build (beacon-blackpill)",
-      "type": "shell",
-      "command": "cmake --preset Debug && cmake --build --preset Debug",
-      "options": {
-        "cwd": "${workspaceFolder}/beacon-blackpill"
-      },
-      "group": "build",
-      "problemMatcher": [
-        "$gcc"
-      ],
       "presentation": {
         "reveal": "always",
         "panel": "dedicated",
@@ -195,17 +69,6 @@
         "reveal": "always",
         "panel": "dedicated",
         "clear": true
-      }
-    },
-    {
-      "label": "STM32: kill stray debug processes (beacon-blackpill)",
-      "type": "shell",
-      "command": "pkill -f st-util; pkill -f gdb-multiarch; true",
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "silent",
-        "panel": "dedicated",
-        "clear": false
       }
     }
   ]

@@ -1,3 +1,5 @@
+#ifndef SX1280_DEVICE_HPP
+#define SX1280_DEVICE_HPP
 
 #include <cstdint>
 
@@ -82,3 +84,5 @@ private:
 
   SX1280_Status to_status(uint8_t r);
 };
+
+#endif
