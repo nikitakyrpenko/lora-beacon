@@ -104,6 +104,32 @@ Beacon (`beacon-blackpill/`):
 cmake --preset Release -DBRINGUP_MODE=0 -DDEBUG_BEACON=ON && cmake --build --preset Release
 ```
 
+## Anchor state machine
+`AnchorBridge::step()` is called every main-loop pass (then `WFI`). It reads and clears the radio IRQ once and runs the handler of the current state.
+
+```text
+                    to_radio ok               RxDone + wake word
+ boot --> RECOVER ---------------> LISTENING -------------------> ACK_REQUESTED
+             ^                        ^                                |
+             |                        | RESPONSE_DONE or               | slot reached,
+             |                        | window closed                  | ack sent, TX_DONE
+             |                        |                                v
+             |                     RANGING <------------------- ACK_SENT
+             |                                  slave armed
+             |
+             +-- from LISTENING, ACK_REQUESTED, ACK_SENT, RANGING on any failure:
+                 header/CRC error, not a wake word, slot missed (> 10 ms), ack send failed,
+                 no TX_DONE (50 ms), arming failed, request discarded, to_radio failed
+```
+
+| State | Chip | Waits for | Leaves when |
+|---|---|---|---|
+| `RECOVER` | unknown | retry timer | `to_radio()` ok -> `LISTENING`; first try is immediate, then every 1 s, chip reset (NRESET) after 3 fails |
+| `LISTENING` | RX | DIO1: RxDone, header error, CRC error | wake word matches -> `ACK_REQUESTED`; anything else -> `RECOVER` |
+| `ACK_REQUESTED` | STDBY | this anchor's ack slot (`(address - 0xA19) x 20 ms`) | sends the ack and polls TX_DONE (50 ms); more than 10 ms late or any failure -> `RECOVER` |
+| `ACK_SENT` | STDBY | nothing, next pass | `to_ranging_slave()` ok -> `RANGING`, else `RECOVER` |
+| `RANGING` | ranging slave | DIO1: RESPONSE_DONE, or the window from the wake packet | back to `LISTENING` via `to_radio()` |
+
 ## Example log
 Prerequisite: build with `-DDEBUG_BEACON=ON` (beacon) / `-DDEBUG_ANCHOR=ON` (anchor), otherwise nothing is printed. Open the UART terminal at 115200 8N1 before reset.
 
@@ -127,12 +153,12 @@ Beacon:
 ```
 Anchor:
 ```
-[83789] entering RADIO
+[83789] entering LISTENING
 [86767] wake word matched (ranging window 2000ms, ack delay 0ms)
 [86773] send_ranging_slave_ack mask=0xF (full=0xF)
 [86779] send_ranging_slave_ack: TX_DONE confirmed (irq_mask=0x1)
 [86786] entering RANGING
-[88789] entering RADIO
+[88789] entering LISTENING
 ```
 Timestamps are ms since boot. The beacon example shows ranging timeouts (open issue, see PROTOCOL.md).
 

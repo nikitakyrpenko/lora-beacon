@@ -91,10 +91,7 @@ static void MX_USART1_UART_Init(void);
 static bool bringup_check_command_roundtrip(AnchorBridge& bridge)
 {
   const uint16_t mask = bridge.to_radio();
-  printf("[%lu]   to_radio mask=0x%03X (full=0x1FF) get_mode()=%s\r\n",
-         (unsigned long)HAL_GetTick(),
-         mask,
-         bridge.get_mode() == MODE::RADIO ? "RADIO" : "NONE");
+  printf("[%lu]   to_radio mask=0x%03X (full=0x1FF)\r\n", (unsigned long)HAL_GetTick(), mask);
 
   SX1280Device::SX1280_Status sta{};
   const HAL_StatusTypeDef hal = bridge.get_status(&sta);
@@ -123,7 +120,7 @@ static bool bringup_check_dio1(AnchorBridge& bridge)
   const uint16_t mask = bridge.send_ranging_slave_ack();
   printf("[%lu]   send_ranging_slave_ack mask=0x%X (full=0xF)\r\n", (unsigned long)HAL_GetTick(), mask);
 
-  // the ack's own TX_DONE poll already ran inside; allow slack for the EXTI path
+  // the ack is only started here (no TX_DONE poll any more); the edge arrives when the transmission ends, allow slack for it
   const bool ok = SX1280BringUp::WaitForFlag(&DIO1_Callback_detected, 100);
   if (!ok) {
     printf("[%lu]   no DIO1 edge after the ack's TX_DONE: chip not raising DIO1, the DIO1 wire, or the EXTI/NVIC path\r\n",
@@ -243,11 +240,7 @@ int main(void)
   static AnchorBridge anchor_bridge(
     &hspi3, BUSY_GPIO_Port, NSS_GPIO_Port, NRESET_GPIO_Port, TCXOEN_GPIO_Port, BUSY_Pin, NSS_Pin, NRESET_Pin, TCXOEN_Pin);
 
-  anchor_bridge.to_radio();
-
-  if (anchor_bridge.get_mode() == MODE::RADIO) {
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-  }
+  // the bridge starts in RECOVER, so its first step() configures the radio and moves to LISTENING
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -257,6 +250,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     anchor_bridge.step(DIO1_Callback_detected);
+    __WFI();
   }
 #endif  // BRINGUP_MODE
   /* USER CODE END 3 */

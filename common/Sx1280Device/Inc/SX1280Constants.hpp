@@ -110,6 +110,8 @@ static constexpr uint16_t ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT = 90;
 // IRQ bit positions (Table 11-71/13-6x), combined into SetDioIrqParams'/GetIrqStatus'/ClearIrqStatus' 16-bit masks
 static constexpr uint16_t IRQ_BIT_TX_DONE = static_cast<uint16_t>(1u << 0);
 static constexpr uint16_t IRQ_BIT_RX_DONE = static_cast<uint16_t>(1u << 1);
+static constexpr uint16_t IRQ_BIT_HEADER_ERROR = static_cast<uint16_t>(1u << 5);
+static constexpr uint16_t IRQ_BIT_CRC_ERROR = static_cast<uint16_t>(1u << 6);
 static constexpr uint16_t IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE = static_cast<uint16_t>(1u << 7);
 static constexpr uint16_t IRQ_BIT_RANGING_SLAVE_REQUEST_DISCARD = static_cast<uint16_t>(1u << 8);
 static constexpr uint16_t IRQ_BIT_RANGING_MASTER_RESULT_VALID = static_cast<uint16_t>(1u << 9);
@@ -271,12 +273,15 @@ static constexpr uint8_t WAKE_PACKET_PARAMS[7] = {SX1280_VALUES::LORA_PREAMBLE_1
                                                   0x00,
                                                   0x00};
 
-// SetDioIrqParams payload routing only RX_DONE to DIO1 (irqMask + dio1Mask both set, dio2Mask/dio3Mask left 0) --
-// used by the anchor's radio-mode idle-listen setup.
-static constexpr uint8_t RX_DONE_IRQ_MASK[8] = {static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_RX_DONE >> 8),
-                                                static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_RX_DONE),
-                                                static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_RX_DONE >> 8),
-                                                static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_RX_DONE),
+// SetDioIrqParams payload routing RX_DONE, HEADER_ERROR and CRC_ERROR to DIO1 (irqMask + dio1Mask both set, dio2Mask/dio3Mask
+// left 0) -- used by the anchor's radio-mode idle-listen setup. The two error bits let the anchor tell a corrupted packet from a
+// good one (and learn that its single-shot RX has ended).
+static constexpr uint16_t IDLE_RX_IRQ_BITS =
+  SX1280_VALUES::IRQ_BIT_RX_DONE | SX1280_VALUES::IRQ_BIT_HEADER_ERROR | SX1280_VALUES::IRQ_BIT_CRC_ERROR;
+static constexpr uint8_t IDLE_RX_IRQ_MASK[8] = {static_cast<uint8_t>(IDLE_RX_IRQ_BITS >> 8),
+                                                static_cast<uint8_t>(IDLE_RX_IRQ_BITS),
+                                                static_cast<uint8_t>(IDLE_RX_IRQ_BITS >> 8),
+                                                static_cast<uint8_t>(IDLE_RX_IRQ_BITS),
                                                 0x0,
                                                 0x0,
                                                 0x0,

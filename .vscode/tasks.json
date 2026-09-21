@@ -4,7 +4,7 @@
     {
       "label": "STM32: build (anchor-blackpill)",
       "type": "shell",
-      "command": "cmake --preset Release -DBRINGUP_MODE=0 -DDEBUG_ANCHOR=ON -DANCHOR_ADDRESS=0x00000A19 -DANCHOR_X_CM=1 -DANCHOR_Y_CM=-2 -DANCHOR_Z_CM=2 && cmake --build --preset Release",
+      "command": "cmake --preset Release -DBRINGUP_MODE=0 -DDEBUG_ANCHOR=ON -DANCHOR_ADDRESS=0x00000A1B -DANCHOR_X_CM=1 -DANCHOR_Y_CM=-2 -DANCHOR_Z_CM=2 && cmake --build --preset Release",
       "options": {
         "cwd": "${workspaceFolder}/anchor-blackpill"
       },
