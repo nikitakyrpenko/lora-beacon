@@ -10,6 +10,7 @@
 #include "SX1280Device.hpp"
 #include "stm32h5xx_hal.h"
 #include "stm32h5xx_hal_def.h"
+#include "stm32h5xx_hal_tim.h"
 
 #ifdef DEBUG_ANCHOR
 #include <cstdio>
@@ -17,10 +18,6 @@
 #else
 #define ANCHOR_LOG(...)
 #endif
-
-// how long to poll GetIrqStatus for TX_DONE after issuing the ack's SetTx before giving up -- generous margin
-// over the ack payload's actual SF7 airtime (single-digit ms)
-static constexpr uint32_t ACK_TX_DONE_TIMEOUT_MS = 50;
 
 namespace {
 
@@ -530,6 +527,19 @@ HAL_StatusTypeDef AnchorBridge::get_irq_mask(uint16_t* mask_out)
   return hal;
 }
 
+void AnchorBridge::arm_timer(uint32_t ms)
+{
+  __HAL_TIM_CLEAR_FLAG(timer, TIM_FLAG_UPDATE);
+  __HAL_TIM_SET_COUNTER(timer, 0);
+  __HAL_TIM_SET_AUTORELOAD(timer, ms - 1);
+  HAL_TIM_Base_Start_IT(timer);
+}
+
+void AnchorBridge::disarm_timer()
+{
+  HAL_TIM_Base_Stop_IT(timer);
+}
+
 void AnchorBridge::on_listen(uint16_t irq, uint32_t tick)
 {
   // a corrupted packet still ends the single-shot RX, so each error is its own way to RECOVER (which re-arms RX)
@@ -550,9 +560,10 @@ void AnchorBridge::on_listen(uint16_t irq, uint32_t tick)
 
     if (ack) {
       if (is_wake_word_matches(*ack)) {
-        latch.ranging = clamp_ranging_window(*ack);
-        deadline.ack = tick + latch.ack;
         mode = Mode::ACK_REQUESTED;
+        latch.ranging = clamp_ranging_window(*ack);
+        arm_timer(latch.ack);
+
         return;
       }
       else {
@@ -569,71 +580,51 @@ void AnchorBridge::on_listen(uint16_t irq, uint32_t tick)
 
 void AnchorBridge::on_ack_requested(uint16_t irq, uint32_t tick)
 {
-  constexpr uint32_t MAX_ACK_DELAY_MS = 10;
+  static constexpr uint32_t ACK_TX_DONE_TIMEOUT_MS = 50;
 
-  //ack deadline not reached
-  if (static_cast<int32_t>(tick - deadline.ack) < 0) {
-    return;
-  }
-
-  //if delayed too much -> fallback to recover
-  if (tick - deadline.ack > MAX_ACK_DELAY_MS) {
-    ANCHOR_LOG("[%lu] on_ack_requested: ack slot missed by %lu ms (limit %lu ms), dropping the ack\r\n",
-               (unsigned long)tick,
-               (unsigned long)(tick - deadline.ack),
-               (unsigned long)MAX_ACK_DELAY_MS);
-    mode = Mode::RECOVER;
-    return;
-  }
   const uint16_t r = send_ack();
   if (r != ACK_SUCCESS) {
     ANCHOR_LOG("[%lu] on_ack_requested: ack send failed mask=0x%X (full=0xF)\r\n", (unsigned long)tick, r);
     mode = Mode::RECOVER;
     return;
   }
+  mode = Mode::ACK_IN_PROGRESS;
+  arm_timer(ACK_TX_DONE_TIMEOUT_MS);
+}
 
-  // the ack is only done once it has left the antenna: poll TX_DONE, the chip does not leave TX on its own after a fault
-  bool tx_done = false;
-  const uint32_t tx_start_tick = HAL_GetTick();
-  while (HAL_GetTick() - tx_start_tick < ACK_TX_DONE_TIMEOUT_MS) {
-    uint16_t tx_irq = 0;
-    if (get_irq_mask(&tx_irq) == HAL_OK && (tx_irq & SX1280_VALUES::IRQ_BIT_TX_DONE)) {
-      tx_done = true;
-      break;
-    }
-  }
-
-  SX1280Device::SX1280_Status sta{};
-  clear_irq_mask(&sta);
-
-  if (!tx_done) {
-    ANCHOR_LOG("[%lu] on_ack_requested: TX_DONE not seen within %lu ms\r\n", (unsigned long)tick, (unsigned long)ACK_TX_DONE_TIMEOUT_MS);
-    mode = Mode::RECOVER;
+void AnchorBridge::on_ack_in_progress(uint16_t irq, uint32_t hal_tick)
+{
+  // ack tx done -- proceed straight into arming the ranging slave, nothing else waits on this transition
+  if (irq & SX1280_VALUES::IRQ_BIT_TX_DONE) {
+    disarm_timer();
+    on_ack_done(irq, hal_tick);
     return;
   }
 
-  mode = Mode::ACK_SENT;
+  //ACK_TX_DONE_TIMEOUT_MS expired (chip can be in a bad state without TX_DONE callback routed to DIO1) -> fallback to Recover
+  mode = Mode::RECOVER;
 }
 
-void AnchorBridge::on_ack_sent(uint16_t irq, uint32_t tick)
+void AnchorBridge::on_ack_done(uint16_t irq, uint32_t tick)
 {
-  // the ack has left the antenna (confirmed in on_ack_requested): arm the ranging slave
   const uint16_t r = to_ranging();
   if (r != RANGING_SUCCESS) {
-    ANCHOR_LOG("[%lu] on_ack_sent: to_ranging_slave failed mask=0x%X (full=0x%X)\r\n", (unsigned long)tick, r, RANGING_SUCCESS);
+    ANCHOR_LOG("[%lu] on_ack_done: to_ranging_slave failed mask=0x%X (full=0x%X)\r\n", (unsigned long)tick, r, RANGING_SUCCESS);
     mode = Mode::RECOVER;
     return;
   }
 
-  // the window starts once the slave is armed
-  deadline.ranging = HAL_GetTick() + latch.ranging;
+  // the ranging window starts once the slave is armed
   mode = Mode::RANGING;
+  arm_timer(latch.ranging);
 }
 
-void AnchorBridge::on_ranging(uint16_t irq, uint32_t tick)
+void AnchorBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)
 {
   // the slave response has left the antenna
   if (irq & SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE) {
+    disarm_timer();
+
     if (to_radio() != RADIO_SUCCESS) {
       mode = Mode::RECOVER;
       return;
@@ -644,25 +635,28 @@ void AnchorBridge::on_ranging(uint16_t irq, uint32_t tick)
 
   // the request was discarded
   if (irq & SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_REQUEST_DISCARD) {
+    disarm_timer();
+
     ANCHOR_LOG("[%lu] on_ranging: request discarded (irq=0x%X)\r\n", (unsigned long)tick, irq);
     mode = Mode::RECOVER;
     return;
   }
 
-  // MASTER_REQUEST_VALID is the normal first event of an exchange, nothing to do; anything else is unexpected but not fatal
-  if (irq & static_cast<uint16_t>(~SX1280_VALUES::IRQ_BIT_RANGING_MASTER_REQUEST_VALID)) {
-    ANCHOR_LOG("[%lu] on_ranging: unexpected irq bits set (irq=0x%X)\r\n", (unsigned long)tick, irq);
+  if (!timer_event) {
+    // MASTER_REQUEST_VALID is the normal first event of an exchange, nothing to do; anything else is unexpected but not fatal
+    if (irq & static_cast<uint16_t>(~SX1280_VALUES::IRQ_BIT_RANGING_MASTER_REQUEST_VALID)) {
+      ANCHOR_LOG("[%lu] on_ranging: unexpected irq bits set (irq=0x%X)\r\n", (unsigned long)tick, irq);
+    }
+    return;
   }
 
-  // window closed without a finished exchang
-  if (static_cast<int32_t>(tick - deadline.ranging) >= 0) {
-    ANCHOR_LOG("[%lu] on_ranging: window closed without a response\r\n", (unsigned long)tick);
-    if (to_radio() != RADIO_SUCCESS) {
-      mode = Mode::RECOVER;
-      return;
-    }
-    mode = Mode::LISTENING;
+  // window closed without a finished exchange -> fall back to radio
+  if (to_radio() != RADIO_SUCCESS) {
+    mode = Mode::RECOVER;
+    return;
   }
+  ANCHOR_LOG("[%lu] on_ranging: window closed without a response\r\n", (unsigned long)tick);
+  mode = Mode::LISTENING;
 }
 
 void AnchorBridge::on_recover(uint16_t irq, uint32_t tick)
@@ -698,7 +692,7 @@ void AnchorBridge::on_recover(uint16_t irq, uint32_t tick)
     "[%lu] on_recover: to_radio failed mask=0x%03X (attempt %u)\r\n", (unsigned long)tick, r, static_cast<unsigned>(recover_fail_count));
 }
 
-void AnchorBridge::step(volatile uint8_t& dio1_flag)
+void AnchorBridge::step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag)
 {
   // one place reads and clears the IRQ status; the handlers get the result as a parameter
   uint16_t irq = 0;
@@ -712,9 +706,15 @@ void AnchorBridge::step(volatile uint8_t& dio1_flag)
     clear_irq_mask(&sta);
   }
 
+  const bool timer_event = tim_flag;
+  if (timer_event) {
+    tim_flag = 0;
+  }
+
   const uint32_t now = HAL_GetTick();
 
-  // handlers that react to a radio event only run when DIO1 fired, the others run on every pass
+  // each handler is gated on whichever wake source(s) are actually meaningful to it, so a plain
+  // SysTick-only wake (neither dio1 nor timer) is a safe no-op pass through the switch
   switch (mode) {
     case Mode::LISTENING:
       if (dio1_event) {
@@ -722,13 +722,19 @@ void AnchorBridge::step(volatile uint8_t& dio1_flag)
       }
       break;
     case Mode::ACK_REQUESTED:
-      on_ack_requested(irq, now);
+      if (timer_event) {
+        on_ack_requested(irq, now);
+      }
       break;
-    case Mode::ACK_SENT:
-      on_ack_sent(irq, now);
+    case Mode::ACK_IN_PROGRESS:
+      if (dio1_event || timer_event) {
+        on_ack_in_progress(irq, now);
+      }
       break;
     case Mode::RANGING:
-      on_ranging(irq, now);
+      if (dio1_event || timer_event) {
+        on_ranging(irq, timer_event, now);
+      }
       break;
     case Mode::RECOVER:
       on_recover(irq, now);

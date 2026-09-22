@@ -6,6 +6,7 @@
 #include "AckPacketIn.hpp"
 #include "SX1280Constants.hpp"
 #include "SX1280Device.hpp"
+#include "stm32h5xx_hal_tim.h"
 
 #if !defined(ANCHOR_ADDRESS) || !defined(ANCHOR_X_CM) || !defined(ANCHOR_Y_CM) || !defined(ANCHOR_Z_CM)
 #error "ANCHOR_ADDRESS / ANCHOR_X_CM / ANCHOR_Y_CM / ANCHOR_Z_CM must be defined (see anchor-blackpill/CMakeLists.txt)"
@@ -24,7 +25,7 @@ static constexpr uint16_t RADIO_SUCCESS = 0x1FF;
 static constexpr uint16_t RANGING_SUCCESS = 0x7FF;
 static constexpr uint16_t ACK_SUCCESS = 0xF;
 
-enum class Mode { LISTENING, RANGING, ACK_REQUESTED, ACK_SENT, RECOVER };
+enum class Mode { LISTENING, RANGING, ACK_REQUESTED, ACK_IN_PROGRESS, RECOVER };
 
 class AnchorBridge {
   //represents how much time can anchor spend in mode i.e. window durations
@@ -44,6 +45,7 @@ class AnchorBridge {
 
 public:
   AnchorBridge(SPI_HandleTypeDef* SPI_port_,
+               TIM_HandleTypeDef* TIM_timer,
                GPIO_TypeDef* BUSY_GPIO_port_,
                GPIO_TypeDef* NSS_GPIO_port_,
                GPIO_TypeDef* NRESET_GPIO_port_,
@@ -54,6 +56,7 @@ public:
                uint16_t TCXOEN_pin_)
     : device(
         SPI_port_, BUSY_GPIO_port_, NSS_GPIO_port_, NRESET_GPIO_port_, TCXOEN_GPIO_port_, BUSY_pin_, NSS_pin_, NRESET_pin_, TCXOEN_pin_)
+    , timer(TIM_timer)
   {
     device.NRESET_reset();
   }
@@ -61,26 +64,29 @@ public:
   inline Deadline get_deadline() { return deadline; }
   inline Mode get_mode() { return mode; }
 
-  void step(volatile uint8_t& dio1_flag);
+  void step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag);
 
-  // used directly by the module-level bring-up harness (main.cpp, BRINGUP_MODE == 2) to exercise
-  // individual radio steps outside the state machine -- see bringup_check_command_roundtrip/_dio1
   uint16_t to_radio();
   uint16_t send_ack();
   HAL_StatusTypeDef get_status(SX1280Device::SX1280_Status* sta_out);
 
 private:
   SX1280Device device;
+  TIM_HandleTypeDef* timer;
   Mode mode{Mode::RECOVER};
 
   Latch latch{};
   Deadline deadline{};
 
+  void arm_timer(uint32_t ms);
+  void disarm_timer();
+
   // state handlers
   void on_listen(uint16_t irq, uint32_t hal_tick);
   void on_ack_requested(uint16_t irq, uint32_t hal_tick);
-  void on_ack_sent(uint16_t irq, uint32_t hal_tick);
-  void on_ranging(uint16_t irq, uint32_t hal_tick);
+  void on_ack_in_progress(uint16_t irq, uint32_t hal_tick);
+  void on_ack_done(uint16_t irq, uint32_t hal_tick);
+  void on_ranging(uint16_t irq, bool timer_event, uint32_t hal_tick);
   void on_recover(uint16_t irq, uint32_t hal_tick);
 
   uint16_t to_ranging();
