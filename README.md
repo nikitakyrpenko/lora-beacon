@@ -66,7 +66,7 @@ The TCXO is started before the reset so the clock is stable when the chip boots.
 | Packet params | same as radio, but CRC off |
 | Address check | 8-bit (register 0x931 = 0x00) |
 | Anchor address | `ANCHOR_ADDRESS`, block starts at `0x00000A19` |
-| Calibration | 13610 (register 0x92C), per module pair, not verified |
+| Calibration | none written, register 0x92C keeps the chip default (raw results) |
 | Result | debiased, `distance_cm = raw x 20` |
 | Master IRQ | RESULT_VALID (bit 9), TIMEOUT (bit 10) |
 | Slave IRQ | RESPONSE_DONE (bit 7), MASTER_REQUEST_VALID (bit 11) |
@@ -164,4 +164,4 @@ Timestamps are ms since boot. The beacon example shows ranging timeouts (open is
 
 ## Further development
 - **Payload encryption.** Wake and ack payloads are plain today, so anchor positions can be read and the wake can be replayed. Encrypt and authenticate them in firmware (the SX1280 has no AES engine), with a per-cycle counter or nonce against replay and a key stored per device.
-- **Ranging calibration.** The RxTx-delay register (13610) is an offset tuned by hand at two distances, and close range returns 0 cm. Measure at known distances (1 m, 2.5 m, 5 m), fit the offset per anchor and beacon pair, keep it per anchor instead of one constant, and consider averaging several results per anchor.
+- **Ranging calibration.** The RxTx-delay register is not written, so results are uncalibrated. Measure at known distances (1 m, 2.5 m, 5 m), fit the offset per anchor and beacon pair, keep it per anchor instead of one constant, and consider averaging several results per anchor.

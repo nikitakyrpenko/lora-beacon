@@ -19,5 +19,5 @@ Addresses start at 0xA19, differ in the low byte (8-bit ranging address check) a
 ## Known issues
 - Ranging requests time out with two anchors. Suspect: SetRx count 0x0000 is Rx single (ends after any frame); the datasheet advises 0xFFFF for
   the slave. Continuous RX gave distances, but one anchor then stopped answering; reverted.
-- Calibration 13610 gives 0 cm at close range; re-derive at known distances.
+- Ranging calibration is not written (chip default, raw results); calibrate at known distances.
 - Idle duty cycling is off, the ranging-window sizing formula is open, and an anchor is not retried when its to_radio() fails.

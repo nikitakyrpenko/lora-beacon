@@ -117,7 +117,7 @@ static bool bringup_check_command_roundtrip(AnchorBridge& bridge)
 static bool bringup_check_dio1(AnchorBridge& bridge)
 {
   DIO1_Callback_detected = 0;
-  const uint16_t mask = bridge.send_ranging_slave_ack();
+  const uint16_t mask = bridge.send_ack();
   printf("[%lu]   send_ranging_slave_ack mask=0x%X (full=0xF)\r\n", (unsigned long)HAL_GetTick(), mask);
 
   // the ack is only started here (no TX_DONE poll any more); the edge arrives when the transmission ends, allow slack for it

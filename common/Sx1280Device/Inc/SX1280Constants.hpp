@@ -221,7 +221,8 @@ static constexpr uint8_t LONG_PREAMBLE_ENABLE = 0x01;
 // Application-level protocol constants -- not SX1280 hardware facts, kept separate from the datasheet-sourced
 // namespaces above. Shared verbatim between anchor and rover (once rover exists).
 namespace LORA_BEACON_PROTOCOL {
-static constexpr uint8_t WAKE_WORD[2] = {0xBE, 0xAC};
+static constexpr uint8_t WAKE_WORD_LEN = 2;
+static constexpr uint8_t WAKE_WORD[WAKE_WORD_LEN] = {0xBE, 0xAC};
 // Full wake payload: WAKE_WORD magic (2 bytes) + a rover-supplied ranging-window duration in ms (2 bytes,
 // MSB-first, up to 65535ms) -- the anchor arms its ARMED-window timer from this received value instead of its own
 // compile-time RANGING_WINDOW_MS constant, per the planned runtime-config step (see memory
@@ -247,7 +248,7 @@ static constexpr uint32_t COLLECT_PHASE_CEILING_MS = 150;
 static constexpr uint8_t EXPECTED_ANCHOR_COUNT = 2;
 // Default/fallback value -- also what the beacon currently sends in the wake payload's duration field (nothing
 // tunes it per-cycle yet, but it no longer has to match a compile-time constant baked into the anchor separately).
-static constexpr uint32_t RANGING_WINDOW_MS = 2000;
+static constexpr uint32_t DEFAULT_RANGING_WINDOW_MS = 2000;
 // The wake payload's duration field arrives over radio untrusted -- RxDone doesn't guarantee a valid packet, and
 // even a well-formed one could in principle carry a nonsense value. The anchor clamps into this range before
 // arming any timer with it, rather than trusting the received value blindly.

@@ -22,13 +22,13 @@ struct AckPacket {
     ByteOrder::put_i16(out + 8, z_cm);
   }
 
-  static AckPacket parse(const uint8_t* in)
+  static AckPacket parse(const uint8_t* buf)
   {
     AckPacket ack{};
-    ack.anchor_id = ByteOrder::get_u32(in);
-    ack.x_cm = ByteOrder::get_i16(in + 4);
-    ack.y_cm = ByteOrder::get_i16(in + 6);
-    ack.z_cm = ByteOrder::get_i16(in + 8);
+    ack.anchor_id = ByteOrder::get_u32(buf);
+    ack.x_cm = ByteOrder::get_i16(buf + 4);
+    ack.y_cm = ByteOrder::get_i16(buf + 6);
+    ack.z_cm = ByteOrder::get_i16(buf + 8);
     return ack;
   }
 };

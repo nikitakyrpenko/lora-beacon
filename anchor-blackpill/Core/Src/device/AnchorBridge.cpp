@@ -1,16 +1,16 @@
 #include <array>
 #include <cstdint>
+#include <optional>
 
 #include "AckPacket.hpp"
 #include "AnchorBridge.hpp"
+#include "AckPacketIn.hpp"
 #include "ByteOrder.hpp"
 #include "SX1280Constants.hpp"
 #include "SX1280Device.hpp"
 #include "stm32h5xx_hal.h"
 #include "stm32h5xx_hal_def.h"
 
-// Set at build time (-DDEBUG_ANCHOR or #define above this include) to turn all AnchorBridge logging on/off in
-// one place -- main.cpp calls these methods with no printf of its own, so this is the only switch needed.
 #ifdef DEBUG_ANCHOR
 #include <cstdio>
 #define ANCHOR_LOG(...) printf(__VA_ARGS__)
@@ -18,30 +18,6 @@
 #define ANCHOR_LOG(...)
 #endif
 
-// Per-board identity comes from CMake (ANCHOR_ADDRESS / ANCHOR_X_CM / ANCHOR_Y_CM / ANCHOR_Z_CM, see
-// anchor-blackpill/CMakeLists.txt) -- fail the build if a non-CMake build forgot them, rather than silently
-// falling back to some default identity.
-#if !defined(ANCHOR_ADDRESS) || !defined(ANCHOR_X_CM) || !defined(ANCHOR_Y_CM) || !defined(ANCHOR_Z_CM)
-#error "ANCHOR_ADDRESS / ANCHOR_X_CM / ANCHOR_Y_CM / ANCHOR_Z_CM must be defined (see anchor-blackpill/CMakeLists.txt)"
-#endif
-
-// unique anchor address id
-static constexpr uint32_t ANCHOR_RANGING_ADDRESS = ANCHOR_ADDRESS;
-// a lower address would underflow ACK_SLOT_DELAY_MS below
-static_assert(ANCHOR_RANGING_ADDRESS >= LORA_BEACON_PROTOCOL::RANGING_ADDRESS_BLOCK_BASE,
-              "ANCHOR_ADDRESS must be within the discovery block (>= RANGING_ADDRESS_BLOCK_BASE)");
-
-// this anchor's position in cm from the shared site origin, sent to the beacon in the wake ack (int16 each, MSB-first)
-static_assert(ANCHOR_X_CM >= INT16_MIN && ANCHOR_X_CM <= INT16_MAX, "ANCHOR_X_CM must fit int16_t (+-327 m)");
-static_assert(ANCHOR_Y_CM >= INT16_MIN && ANCHOR_Y_CM <= INT16_MAX, "ANCHOR_Y_CM must fit int16_t (+-327 m)");
-static_assert(ANCHOR_Z_CM >= INT16_MIN && ANCHOR_Z_CM <= INT16_MAX, "ANCHOR_Z_CM must fit int16_t (+-327 m)");
-
-static constexpr int16_t ANCHOR_POSITION_CM[3] = {
-  static_cast<int16_t>(ANCHOR_X_CM), static_cast<int16_t>(ANCHOR_Y_CM), static_cast<int16_t>(ANCHOR_Z_CM)};
-
-// delay before sending ACK for beacon wake request to avoid RF collisions
-static constexpr uint32_t ACK_SLOT_DELAY_MS =
-  (ANCHOR_RANGING_ADDRESS - LORA_BEACON_PROTOCOL::RANGING_ADDRESS_BLOCK_BASE) * LORA_BEACON_PROTOCOL::ANCHOR_ACK_SLOT_WIDTH_MS;
 // how long to poll GetIrqStatus for TX_DONE after issuing the ack's SetTx before giving up -- generous margin
 // over the ack payload's actual SF7 airtime (single-digit ms)
 static constexpr uint32_t ACK_TX_DONE_TIMEOUT_MS = 50;
@@ -53,6 +29,29 @@ bool step_ok(HAL_StatusTypeDef hal, const SX1280Device::SX1280_Status& sta)
   return hal == HAL_OK &&
          (sta.command_status == SX1280Device::CommandStatus::COMMAND_SUCCESS ||
           sta.command_status == SX1280Device::CommandStatus::RESERVED || sta.command_status == SX1280Device::CommandStatus::DATA_AVAILABLE);
+}
+
+bool is_wake_word_matches(const AckPacketIn& ack)
+{
+  for (uint8_t i = 0; i < LORA_BEACON_PROTOCOL::WAKE_WORD_LEN; ++i) {
+    if (ack.wake_word[i] != LORA_BEACON_PROTOCOL::WAKE_WORD[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+uint16_t clamp_ranging_window(const AckPacketIn& ack)
+{
+  uint16_t dur = ack.ranging_window_ms;
+
+  if (ack.ranging_window_ms < LORA_BEACON_PROTOCOL::RANGING_WINDOW_MIN_MS) {
+    dur = LORA_BEACON_PROTOCOL::RANGING_WINDOW_MIN_MS;
+  }
+  else if (ack.ranging_window_ms > LORA_BEACON_PROTOCOL::RANGING_WINDOW_MAX_MS) {
+    dur = LORA_BEACON_PROTOCOL::RANGING_WINDOW_MAX_MS;
+  }
+  return dur;
 }
 
 }  // namespace
@@ -207,7 +206,7 @@ uint16_t AnchorBridge::to_radio()
   return mask;
 }
 
-uint16_t AnchorBridge::to_ranging_slave()
+uint16_t AnchorBridge::to_ranging()
 {
   uint16_t mask = 0;
   SX1280Device::SX1280_Status sta{};
@@ -290,7 +289,7 @@ uint16_t AnchorBridge::to_ranging_slave()
 
   // set this anchor's own ranging address
   hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE,
-                         ByteOrder::register_write_u32(SX1280_VALUES::REG_RANGING_SLAVE_OWN_ADDR, ANCHOR_RANGING_ADDRESS).data(),
+                         ByteOrder::register_write_u32(SX1280_VALUES::REG_RANGING_SLAVE_OWN_ADDR, ANCHOR_ADDRESS).data(),
                          nullptr,
                          6,
                          &sta);
@@ -385,9 +384,9 @@ uint16_t AnchorBridge::to_ranging_slave()
   return mask;
 }
 
-uint16_t AnchorBridge::send_ranging_slave_ack()
+uint16_t AnchorBridge::send_ack()
 {
-  const AckPacket ack{ANCHOR_RANGING_ADDRESS, ANCHOR_POSITION_CM[0], ANCHOR_POSITION_CM[1], ANCHOR_POSITION_CM[2]};
+  const AckPacket ack{ANCHOR_ADDRESS, ANCHOR_X_CM, ANCHOR_Y_CM, ANCHOR_Z_CM};
 
   std::array<uint8_t, 1 + LORA_BEACON_PROTOCOL::WAKE_ACK_PAYLOAD_LEN> payload = {
     0x00, LORA_BEACON_PROTOCOL::WAKE_ACK[0], LORA_BEACON_PROTOCOL::WAKE_ACK[1]};
@@ -464,27 +463,19 @@ uint16_t AnchorBridge::send_ranging_slave_ack()
   return mask;
 }
 
-bool AnchorBridge::wake_word_matched()
+std::optional<AckPacketIn> AnchorBridge::get_ack_packet()
 {
   SX1280Device::SX1280_Status sta{};
-
-  // clear IRQ status
-  HAL_StatusTypeDef hal = this->clear_irq_mask(&sta);
-  if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] wake_word_matched: clear_irq_mask failed, hal=%d\r\n", (unsigned long)HAL_GetTick(), static_cast<int>(hal));
-    return false;
-  }
-  sta = {};
 
   constexpr uint8_t BUFF_STA_SIZE = 3;
   uint8_t tx_buff_sta[BUFF_STA_SIZE] = {};
   uint8_t rx_buff_sta[BUFF_STA_SIZE] = {};
 
   // read RX buffer status -> length + start
-  hal = device.SPI_write(&SX1280_OPERATIONS::READ_BUFFER_STATUS_OP_CODE, tx_buff_sta, rx_buff_sta, BUFF_STA_SIZE, &sta);
+  HAL_StatusTypeDef hal = device.SPI_write(&SX1280_OPERATIONS::READ_BUFFER_STATUS_OP_CODE, tx_buff_sta, rx_buff_sta, BUFF_STA_SIZE, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] wake_word_matched: buffer status read failed, hal=%d\r\n", (unsigned long)HAL_GetTick(), static_cast<int>(hal));
-    return false;
+    ANCHOR_LOG("[%lu] buffer read failed, hal=%d\r\n", (unsigned long)HAL_GetTick(), static_cast<int>(hal));
+    return std::nullopt;
   }
 
   uint8_t len = rx_buff_sta[1];
@@ -492,14 +483,12 @@ bool AnchorBridge::wake_word_matched()
 
   // if value of buffer shorter or longer then WAKE_PAYLOAD_LEN -> return early
   if (len != LORA_BEACON_PROTOCOL::WAKE_PAYLOAD_LEN) {
-    ANCHOR_LOG("[%lu] wake_word_matched: unexpected payload len=%u (expected %u)\r\n",
-               (unsigned long)HAL_GetTick(),
-               len,
-               LORA_BEACON_PROTOCOL::WAKE_PAYLOAD_LEN);
-    return false;
+    ANCHOR_LOG(
+      "[%lu] unexpected payload len=%u (expected %u)\r\n", (unsigned long)HAL_GetTick(), len, LORA_BEACON_PROTOCOL::WAKE_PAYLOAD_LEN);
+    return std::nullopt;
   }
 
-  constexpr uint8_t BUFFER_OFFSET_SIZE = 2;  // the buffer offset to start reading from + a mandatory dummy/turnaround clock cycle
+  constexpr uint8_t BUFFER_OFFSET_SIZE = 2;  // the buffer offset to start reading from + a mandatory dummy value
   constexpr uint8_t BUFF_READ_SIZE = BUFFER_OFFSET_SIZE + LORA_BEACON_PROTOCOL::WAKE_PAYLOAD_LEN;
 
   uint8_t tx_buff_read[BUFF_READ_SIZE] = {beg};
@@ -508,41 +497,13 @@ bool AnchorBridge::wake_word_matched()
   // read the received payload
   hal = device.SPI_write(&SX1280_OPERATIONS::READ_BUFFER_OP_CODE, tx_buff_read, rx_buff_read, static_cast<uint16_t>(BUFF_READ_SIZE), &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] wake_word_matched: payload read failed, hal=%d\r\n", (unsigned long)HAL_GetTick(), static_cast<int>(hal));
-    return false;
+    ANCHOR_LOG("[%lu] payload read failed, hal=%d\r\n", (unsigned long)HAL_GetTick(), static_cast<int>(hal));
+    return std::nullopt;
   }
 
-  const uint8_t* payload_start = &rx_buff_read[BUFFER_OFFSET_SIZE];
-  constexpr uint8_t WAKE_WORD_LEN = sizeof(LORA_BEACON_PROTOCOL::WAKE_WORD);
-
-  //check does wake word matches
-  for (uint8_t i = 0; i < WAKE_WORD_LEN; ++i) {
-    if (payload_start[i] != LORA_BEACON_PROTOCOL::WAKE_WORD[i]) {
-      return false;
-    }
-  }
-
-  //fetch duration of ranging mode
-  const uint8_t* duration_bytes = &payload_start[WAKE_WORD_LEN];
-  uint32_t duration_ms = ByteOrder::get_u16(duration_bytes);
-
-  // untrusted (arrived over radio) -- clamp into a safe range before it's ever used to arm a timer, rather
-  // than rejecting it and leaving ranging_window_duration_ms stale
-  if (duration_ms < LORA_BEACON_PROTOCOL::RANGING_WINDOW_MIN_MS) {
-    duration_ms = LORA_BEACON_PROTOCOL::RANGING_WINDOW_MIN_MS;
-  }
-  else if (duration_ms > LORA_BEACON_PROTOCOL::RANGING_WINDOW_MAX_MS) {
-    duration_ms = LORA_BEACON_PROTOCOL::RANGING_WINDOW_MAX_MS;
-  }
-  ranging_window_duration_ms = duration_ms;
-
-  ANCHOR_LOG("[%lu] wake word matched (ranging window %lums, ack delay %lums)\r\n",
-             (unsigned long)HAL_GetTick(),
-             (unsigned long)ranging_window_duration_ms,
-             (unsigned long)get_ack_delay_ms());
-
-  return true;
-}
+  AckPacketIn ack = AckPacketIn::parse(rx_buff_read + BUFFER_OFFSET_SIZE);
+  return ack;
+};
 
 HAL_StatusTypeDef AnchorBridge::get_status(SX1280Device::SX1280_Status* sta_out)
 {
@@ -569,47 +530,41 @@ HAL_StatusTypeDef AnchorBridge::get_irq_mask(uint16_t* mask_out)
   return hal;
 }
 
-void AnchorBridge::log_ranging_irq_unmatched(uint16_t irq_mask)
-{
-  ANCHOR_LOG(
-    "[%lu] %s: DIO1 fired during RANGING but response-done bit not set (mask=0x%X)\r\n", (unsigned long)HAL_GetTick(), __func__, irq_mask);
-}
-
-uint32_t AnchorBridge::get_ack_delay_ms()
-{
-  return ACK_SLOT_DELAY_MS;
-}
-
-uint32_t AnchorBridge::get_ranging_duration_ms()
-{
-  return ranging_window_duration_ms;
-}
-
 void AnchorBridge::on_listen(uint16_t irq, uint32_t tick)
 {
   // a corrupted packet still ends the single-shot RX, so each error is its own way to RECOVER (which re-arms RX)
   if (irq & SX1280_VALUES::IRQ_BIT_HEADER_ERROR) {
     ANCHOR_LOG("[%lu] on_listen: header error (irq=0x%X)\r\n", (unsigned long)tick, irq);
-    mode = MODE::RECOVER;
+    mode = Mode::RECOVER;
     return;
   }
 
   if (irq & SX1280_VALUES::IRQ_BIT_CRC_ERROR) {
     ANCHOR_LOG("[%lu] on_listen: CRC error (irq=0x%X)\r\n", (unsigned long)tick, irq);
-    mode = MODE::RECOVER;
+    mode = Mode::RECOVER;
     return;
   }
 
   if (irq & SX1280_VALUES::IRQ_BIT_RX_DONE) {
-    if (wake_word_matched()) {
-      ack_slot_deadline_tick = tick + get_ack_delay_ms();
-      mode = MODE::ACK_REQUESTED;
-      return;
+    std::optional<AckPacketIn> ack = get_ack_packet();
+
+    if (ack) {
+      if (is_wake_word_matches(*ack)) {
+        latch.ranging = clamp_ranging_window(*ack);
+        deadline.ack = tick + latch.ack;
+        mode = Mode::ACK_REQUESTED;
+        return;
+      }
+      else {
+        ANCHOR_LOG("[%lu] on_listen: wake_word mismatch (irq=0x%X)\r\n", (unsigned long)tick, irq);
+        mode = Mode::RECOVER;
+        return;
+      }
     }
   }
 
   //any other case rollback to recover
-  mode = MODE::RECOVER;
+  mode = Mode::RECOVER;
 }
 
 void AnchorBridge::on_ack_requested(uint16_t irq, uint32_t tick)
@@ -617,23 +572,23 @@ void AnchorBridge::on_ack_requested(uint16_t irq, uint32_t tick)
   constexpr uint32_t MAX_ACK_DELAY_MS = 10;
 
   //ack deadline not reached
-  if (static_cast<int32_t>(tick - ack_slot_deadline_tick) < 0) {
+  if (static_cast<int32_t>(tick - deadline.ack) < 0) {
     return;
   }
 
   //if delayed too much -> fallback to recover
-  if (tick - ack_slot_deadline_tick > MAX_ACK_DELAY_MS) {
+  if (tick - deadline.ack > MAX_ACK_DELAY_MS) {
     ANCHOR_LOG("[%lu] on_ack_requested: ack slot missed by %lu ms (limit %lu ms), dropping the ack\r\n",
                (unsigned long)tick,
-               (unsigned long)(tick - ack_slot_deadline_tick),
+               (unsigned long)(tick - deadline.ack),
                (unsigned long)MAX_ACK_DELAY_MS);
-    mode = MODE::RECOVER;
+    mode = Mode::RECOVER;
     return;
   }
-  const uint16_t r = send_ranging_slave_ack();
-  if (r != 0xF) {
+  const uint16_t r = send_ack();
+  if (r != ACK_SUCCESS) {
     ANCHOR_LOG("[%lu] on_ack_requested: ack send failed mask=0x%X (full=0xF)\r\n", (unsigned long)tick, r);
-    mode = MODE::RECOVER;
+    mode = Mode::RECOVER;
     return;
   }
 
@@ -653,60 +608,60 @@ void AnchorBridge::on_ack_requested(uint16_t irq, uint32_t tick)
 
   if (!tx_done) {
     ANCHOR_LOG("[%lu] on_ack_requested: TX_DONE not seen within %lu ms\r\n", (unsigned long)tick, (unsigned long)ACK_TX_DONE_TIMEOUT_MS);
-    mode = MODE::RECOVER;
+    mode = Mode::RECOVER;
     return;
   }
 
-  mode = MODE::ACK_SENT;
+  mode = Mode::ACK_SENT;
 }
 
 void AnchorBridge::on_ack_sent(uint16_t irq, uint32_t tick)
 {
   // the ack has left the antenna (confirmed in on_ack_requested): arm the ranging slave
-  const uint16_t r = to_ranging_slave();
-  if (r != 0x7FF) {
-    ANCHOR_LOG("[%lu] on_ack_sent: to_ranging_slave failed mask=0x%X (full=0x7FF)\r\n", (unsigned long)tick, r);
-    mode = MODE::RECOVER;
+  const uint16_t r = to_ranging();
+  if (r != RANGING_SUCCESS) {
+    ANCHOR_LOG("[%lu] on_ack_sent: to_ranging_slave failed mask=0x%X (full=0x%X)\r\n", (unsigned long)tick, r, RANGING_SUCCESS);
+    mode = Mode::RECOVER;
     return;
   }
 
   // the window starts once the slave is armed
-  ranging_window_deadline_tick = HAL_GetTick() + ranging_window_duration_ms;
-  mode = MODE::RANGING;
+  deadline.ranging = HAL_GetTick() + latch.ranging;
+  mode = Mode::RANGING;
 }
 
 void AnchorBridge::on_ranging(uint16_t irq, uint32_t tick)
 {
-  // the slave response has left the antenna: the exchange is over, back to listening
+  // the slave response has left the antenna
   if (irq & SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE) {
-    if (to_radio() != 0x1FF) {
-      mode = MODE::RECOVER;
+    if (to_radio() != RADIO_SUCCESS) {
+      mode = Mode::RECOVER;
       return;
     }
-    mode = MODE::LISTENING;
+    mode = Mode::LISTENING;
     return;
   }
 
-  // the request was discarded: the ranging slave can not be trusted any more
+  // the request was discarded
   if (irq & SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_REQUEST_DISCARD) {
     ANCHOR_LOG("[%lu] on_ranging: request discarded (irq=0x%X)\r\n", (unsigned long)tick, irq);
-    mode = MODE::RECOVER;
+    mode = Mode::RECOVER;
     return;
   }
 
   // MASTER_REQUEST_VALID is the normal first event of an exchange, nothing to do; anything else is unexpected but not fatal
   if (irq & static_cast<uint16_t>(~SX1280_VALUES::IRQ_BIT_RANGING_MASTER_REQUEST_VALID)) {
-    log_ranging_irq_unmatched(irq);
+    ANCHOR_LOG("[%lu] on_ranging: unexpected irq bits set (irq=0x%X)\r\n", (unsigned long)tick, irq);
   }
 
-  // window closed without a finished exchange (no request came for this anchor): back to listening
-  if (static_cast<int32_t>(tick - ranging_window_deadline_tick) >= 0) {
+  // window closed without a finished exchang
+  if (static_cast<int32_t>(tick - deadline.ranging) >= 0) {
     ANCHOR_LOG("[%lu] on_ranging: window closed without a response\r\n", (unsigned long)tick);
-    if (to_radio() != 0x1FF) {
-      mode = MODE::RECOVER;
+    if (to_radio() != RADIO_SUCCESS) {
+      mode = Mode::RECOVER;
       return;
     }
-    mode = MODE::LISTENING;
+    mode = Mode::LISTENING;
   }
 }
 
@@ -731,9 +686,9 @@ void AnchorBridge::on_recover(uint16_t irq, uint32_t tick)
   }
 
   const uint16_t r = to_radio();
-  if (r == 0x1FF) {
+  if (r == RADIO_SUCCESS) {
     recover_fail_count = 0;
-    mode = MODE::LISTENING;
+    mode = Mode::LISTENING;
     return;
   }
 
@@ -761,21 +716,21 @@ void AnchorBridge::step(volatile uint8_t& dio1_flag)
 
   // handlers that react to a radio event only run when DIO1 fired, the others run on every pass
   switch (mode) {
-    case MODE::LISTENING:
+    case Mode::LISTENING:
       if (dio1_event) {
         on_listen(irq, now);
       }
       break;
-    case MODE::ACK_REQUESTED:
+    case Mode::ACK_REQUESTED:
       on_ack_requested(irq, now);
       break;
-    case MODE::ACK_SENT:
+    case Mode::ACK_SENT:
       on_ack_sent(irq, now);
       break;
-    case MODE::RANGING:
+    case Mode::RANGING:
       on_ranging(irq, now);
       break;
-    case MODE::RECOVER:
+    case Mode::RECOVER:
       on_recover(irq, now);
       break;
   }
