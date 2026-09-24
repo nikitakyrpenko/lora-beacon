@@ -28,6 +28,18 @@ bool step_ok(HAL_StatusTypeDef hal, const SX1280Device::SX1280_Status& sta)
           sta.command_status == SX1280Device::CommandStatus::RESERVED || sta.command_status == SX1280Device::CommandStatus::DATA_AVAILABLE);
 }
 
+void log_step_failure(const char* func, uint16_t mask, HAL_StatusTypeDef hal, const SX1280Device::SX1280_Status& sta)
+{
+  ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
+             (unsigned long)HAL_GetTick(),
+             func,
+             static_cast<int>(hal),
+             static_cast<int>(sta.circuit_mode),
+             static_cast<int>(sta.command_status),
+             static_cast<int>(sta.busy),
+             mask);
+}
+
 bool is_wake_word_matches(const AckPacketIn& ack)
 {
   for (uint8_t i = 0; i < LORA_BEACON_PROTOCOL::WAKE_WORD_LEN; ++i) {
@@ -68,14 +80,7 @@ uint16_t AnchorBridge::to_radio()
   // drop to standby before reconfiguring
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_STANDBY_OP_CODE, &SX1280_VALUES::STDBY_RC_STAND_BY, nullptr, 1, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 0);
@@ -83,14 +88,7 @@ uint16_t AnchorBridge::to_radio()
   // select LoRa packet type
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_TYPE_OP_CODE, &SX1280_VALUES::PACKET_TYPE_LORA, nullptr, 1, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 1);
@@ -98,14 +96,7 @@ uint16_t AnchorBridge::to_radio()
   // set carrier frequency
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_FREQUENCY_OP_CODE, SX1280_VALUES::RF_FREQUENCY_BYTES, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 2);
@@ -113,14 +104,7 @@ uint16_t AnchorBridge::to_radio()
   // set TX/RX buffer base addresses
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_BUFFER_BASE_ADDRESS_OP_CODE, SX1280_VALUES::BUFFER_BASE_ADDRESS, nullptr, 2, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 3);
@@ -128,14 +112,7 @@ uint16_t AnchorBridge::to_radio()
   // set SF7/BW1600/CR4·5 modulation
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_MODULATION_OP_CODE, SX1280_VALUES::MODULATION_PARAMS_SF7, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 4);
@@ -143,14 +120,7 @@ uint16_t AnchorBridge::to_radio()
   // required register fixup for SF7/SF8
   hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::SF_7_FIXUP_WRITE, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 5);
@@ -158,14 +128,7 @@ uint16_t AnchorBridge::to_radio()
   // configure packet params to expect a wake-payload-sized packet
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE, LORA_BEACON_PROTOCOL::WAKE_PACKET_PARAMS, nullptr, 7, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 6);
@@ -173,14 +136,7 @@ uint16_t AnchorBridge::to_radio()
   // route RxDone interrupt to DIO1
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, LORA_BEACON_PROTOCOL::IDLE_RX_IRQ_MASK, nullptr, 8, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 7);
@@ -188,14 +144,7 @@ uint16_t AnchorBridge::to_radio()
   // start listening indefinitely
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_RX_OP_CODE, LORA_BEACON_PROTOCOL::RX_CONTINUOUS_PARAMS, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 8);
@@ -212,14 +161,7 @@ uint16_t AnchorBridge::to_ranging()
   // select ranging packet type
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_TYPE_OP_CODE, &SX1280_VALUES::PACKET_TYPE_RANGING, nullptr, 1, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 0);
@@ -227,14 +169,7 @@ uint16_t AnchorBridge::to_ranging()
   // set carrier frequency
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_FREQUENCY_OP_CODE, SX1280_VALUES::RF_FREQUENCY_BYTES, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 1);
@@ -242,14 +177,7 @@ uint16_t AnchorBridge::to_ranging()
   // set SF7/BW1600/CR4·5 modulation
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_MODULATION_OP_CODE, SX1280_VALUES::MODULATION_PARAMS_SF7, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 2);
@@ -257,14 +185,7 @@ uint16_t AnchorBridge::to_ranging()
   // required register fixup for SF7/SF8
   hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::SF_7_FIXUP_WRITE, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 3);
@@ -272,14 +193,7 @@ uint16_t AnchorBridge::to_ranging()
   // configure packet params for the ranging exchange
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE, SX1280_VALUES::RANGING_PACKET_PARAMS, nullptr, 7, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 4);
@@ -291,14 +205,7 @@ uint16_t AnchorBridge::to_ranging()
                          6,
                          &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 5);
@@ -306,14 +213,7 @@ uint16_t AnchorBridge::to_ranging()
   // set ranging address check length
   hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::RANGING_ADDR_CHECK_LEN_8BIT, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 6);
@@ -321,14 +221,7 @@ uint16_t AnchorBridge::to_ranging()
   // write RxTx-delay calibration offset
   hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::RANGING_CALIBRATION_WRITE, nullptr, 4, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 7);
@@ -336,14 +229,7 @@ uint16_t AnchorBridge::to_ranging()
   // set ranging role to slave
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_RANGING_ROLE_OP_CODE, &SX1280_VALUES::RANGING_ROLE_SLAVE, nullptr, 1, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 8);
@@ -351,14 +237,7 @@ uint16_t AnchorBridge::to_ranging()
   // route ranging interrupts to DIO1
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, SX1280_VALUES::RANGING_SLAVE_IRQ_MASK, nullptr, 8, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 9);
@@ -366,14 +245,7 @@ uint16_t AnchorBridge::to_ranging()
   // start listening indefinitely
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_RX_OP_CODE, LORA_BEACON_PROTOCOL::RX_CONTINUOUS_PARAMS, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 10);
@@ -397,14 +269,7 @@ uint16_t AnchorBridge::send_ack()
   // configure packet params for the ack payload length
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE, LORA_BEACON_PROTOCOL::WAKE_ACK_PACKET_PARAMS, nullptr, 7, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 0);
@@ -412,14 +277,7 @@ uint16_t AnchorBridge::send_ack()
   // write the ack magic + this anchor's own address + position into the TX buffer
   hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_BUFFER_OP_CODE, payload.data(), nullptr, static_cast<uint16_t>(sizeof(payload)), &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 1);
@@ -428,14 +286,7 @@ uint16_t AnchorBridge::send_ack()
   // TX_DONE into the IrqStatus register at all, so this must be reprogrammed before SetTx for the poll below to work
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, LORA_BEACON_PROTOCOL::TX_DONE_IRQ_MASK, nullptr, 8, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 2);
@@ -443,14 +294,7 @@ uint16_t AnchorBridge::send_ack()
   // transmit the ack
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_TX_OP_CODE, LORA_BEACON_PROTOCOL::TX_SINGLE_SHOT_PARAMS, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    ANCHOR_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
-               (unsigned long)HAL_GetTick(),
-               __func__,
-               static_cast<int>(hal),
-               static_cast<int>(sta.circuit_mode),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy),
-               mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 3);
@@ -540,18 +384,25 @@ void AnchorBridge::disarm_timer()
   HAL_TIM_Base_Stop_IT(timer);
 }
 
+void AnchorBridge::try_recover(uint32_t tick)
+{
+  mode = Mode::RECOVER;
+  ANCHOR_LOG("[%lu] entering RECOVER\r\n", (unsigned long)tick);
+  arm_timer(1);  // trigger timer
+}
+
 void AnchorBridge::on_listen(uint16_t irq, uint32_t tick)
 {
   // a corrupted packet still ends the single-shot RX, so each error is its own way to RECOVER (which re-arms RX)
   if (irq & SX1280_VALUES::IRQ_BIT_HEADER_ERROR) {
     ANCHOR_LOG("[%lu] on_listen: header error (irq=0x%X)\r\n", (unsigned long)tick, irq);
-    mode = Mode::RECOVER;
+    try_recover(tick);
     return;
   }
 
   if (irq & SX1280_VALUES::IRQ_BIT_CRC_ERROR) {
     ANCHOR_LOG("[%lu] on_listen: CRC error (irq=0x%X)\r\n", (unsigned long)tick, irq);
-    mode = Mode::RECOVER;
+    try_recover(tick);
     return;
   }
 
@@ -562,20 +413,24 @@ void AnchorBridge::on_listen(uint16_t irq, uint32_t tick)
       if (is_wake_word_matches(*ack)) {
         mode = Mode::ACK_REQUESTED;
         latch.ranging = clamp_ranging_window(*ack);
+        ANCHOR_LOG("[%lu] wake word matched (ranging window %lums, ack delay %lums)\r\n",
+                   (unsigned long)tick,
+                   (unsigned long)latch.ranging,
+                   (unsigned long)latch.ack);
         arm_timer(latch.ack);
 
         return;
       }
       else {
         ANCHOR_LOG("[%lu] on_listen: wake_word mismatch (irq=0x%X)\r\n", (unsigned long)tick, irq);
-        mode = Mode::RECOVER;
+        try_recover(tick);
         return;
       }
     }
   }
 
   //any other case rollback to recover
-  mode = Mode::RECOVER;
+  try_recover(tick);
 }
 
 void AnchorBridge::on_ack_requested(uint16_t irq, uint32_t tick)
@@ -585,7 +440,7 @@ void AnchorBridge::on_ack_requested(uint16_t irq, uint32_t tick)
   const uint16_t r = send_ack();
   if (r != ACK_SUCCESS) {
     ANCHOR_LOG("[%lu] on_ack_requested: ack send failed mask=0x%X (full=0xF)\r\n", (unsigned long)tick, r);
-    mode = Mode::RECOVER;
+    try_recover(tick);
     return;
   }
   mode = Mode::ACK_IN_PROGRESS;
@@ -597,12 +452,13 @@ void AnchorBridge::on_ack_in_progress(uint16_t irq, uint32_t hal_tick)
   // ack tx done -- proceed straight into arming the ranging slave, nothing else waits on this transition
   if (irq & SX1280_VALUES::IRQ_BIT_TX_DONE) {
     disarm_timer();
+    ANCHOR_LOG("[%lu] send_ranging_slave_ack: TX_DONE confirmed (irq_mask=0x%X)\r\n", (unsigned long)hal_tick, irq);
     on_ack_done(irq, hal_tick);
     return;
   }
 
   //ACK_TX_DONE_TIMEOUT_MS expired (chip can be in a bad state without TX_DONE callback routed to DIO1) -> fallback to Recover
-  mode = Mode::RECOVER;
+  try_recover(hal_tick);
 }
 
 void AnchorBridge::on_ack_done(uint16_t irq, uint32_t tick)
@@ -610,26 +466,28 @@ void AnchorBridge::on_ack_done(uint16_t irq, uint32_t tick)
   const uint16_t r = to_ranging();
   if (r != RANGING_SUCCESS) {
     ANCHOR_LOG("[%lu] on_ack_done: to_ranging_slave failed mask=0x%X (full=0x%X)\r\n", (unsigned long)tick, r, RANGING_SUCCESS);
-    mode = Mode::RECOVER;
+    try_recover(tick);
     return;
   }
 
   // the ranging window starts once the slave is armed
   mode = Mode::RANGING;
+  ANCHOR_LOG("[%lu] entering RANGING\r\n", (unsigned long)tick);
   arm_timer(latch.ranging);
 }
 
 void AnchorBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)
 {
-  // the slave response has left the antenna
+  // the slave ranging response has left the antenna
   if (irq & SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE) {
     disarm_timer();
 
     if (to_radio() != RADIO_SUCCESS) {
-      mode = Mode::RECOVER;
+      try_recover(tick);
       return;
     }
     mode = Mode::LISTENING;
+    ANCHOR_LOG("[%lu] entering LISTENING\r\n", (unsigned long)tick);
     return;
   }
 
@@ -638,7 +496,7 @@ void AnchorBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)
     disarm_timer();
 
     ANCHOR_LOG("[%lu] on_ranging: request discarded (irq=0x%X)\r\n", (unsigned long)tick, irq);
-    mode = Mode::RECOVER;
+    try_recover(tick);
     return;
   }
 
@@ -652,44 +510,54 @@ void AnchorBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)
 
   // window closed without a finished exchange -> fall back to radio
   if (to_radio() != RADIO_SUCCESS) {
-    mode = Mode::RECOVER;
+    try_recover(tick);
     return;
   }
   ANCHOR_LOG("[%lu] on_ranging: window closed without a response\r\n", (unsigned long)tick);
   mode = Mode::LISTENING;
+  ANCHOR_LOG("[%lu] entering LISTENING\r\n", (unsigned long)tick);
 }
 
-void AnchorBridge::on_recover(uint16_t irq, uint32_t tick)
+void AnchorBridge::recover_success(uint32_t tick)
 {
-  constexpr uint32_t RECOVER_RETRY_MS = 1000;  // pause between attempts once one has failed
-  constexpr uint8_t RECOVER_RESET_AFTER = 3;   // failed attempts in a row before the chip gets a hardware reset
+  disarm_timer();
+  recover.count = 0;
+  mode = Mode::LISTENING;
+  ANCHOR_LOG("[%lu] entering LISTENING\r\n", (unsigned long)tick);
+}
 
-  // the first attempt is immediate, after a failure wait RECOVER_RETRY_MS (elapsed form, wrap-safe)
-  if (recover_fail_count > 0 && tick - recover_last_fail_tick < RECOVER_RETRY_MS) {
+void AnchorBridge::recover_retry(uint32_t tick, const char* reason)
+{
+  recover.count++;
+  arm_timer(RECOVERY_DELAY_MS);
+  ANCHOR_LOG("[%lu] on_recover: %s failed (recover.count=%u)\r\n", (unsigned long)tick, reason, static_cast<unsigned>(recover.count));
+}
+
+void AnchorBridge::on_recover(bool tim_event, uint32_t tick)
+{
+  if (!tim_event) {
     return;
   }
 
-  // to_radio() keeps failing -> the chip may be stuck (BUSY held high, lost config): reset it first
-  if (recover_fail_count >= RECOVER_RESET_AFTER) {
-    const bool busy_released = device.NRESET_reset();
-    ANCHOR_LOG("[%lu] on_recover: NRESET_reset after %u failed attempts, busy_released=%d\r\n",
-               (unsigned long)tick,
-               static_cast<unsigned>(recover_fail_count),
-               static_cast<int>(busy_released));
-    recover_fail_count = 0;
-  }
-
-  const uint16_t r = to_radio();
-  if (r == RADIO_SUCCESS) {
-    recover_fail_count = 0;
-    mode = Mode::LISTENING;
+  if (recover.count < RADIO_RECOVER_MAX_RETRIES) {
+    if (to_radio() == RADIO_SUCCESS) {
+      recover_success(tick);
+      return;
+    }
+    recover_retry(tick, "switching to radio");
     return;
   }
 
-  ++recover_fail_count;
-  recover_last_fail_tick = tick;
-  ANCHOR_LOG(
-    "[%lu] on_recover: to_radio failed mask=0x%03X (attempt %u)\r\n", (unsigned long)tick, r, static_cast<unsigned>(recover_fail_count));
+  if (device.NRESET_reset()) {
+    ANCHOR_LOG("[%lu] on_recover: NRESET success\r\n", (unsigned long)tick);
+    if (to_radio() == RADIO_SUCCESS) {
+      recover_success(tick);
+      return;
+    }
+    recover_retry(tick, "post-NRESET radio retry");
+    return;
+  }
+  recover_retry(tick, "NRESET");
 }
 
 void AnchorBridge::step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag)
@@ -713,8 +581,6 @@ void AnchorBridge::step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag)
 
   const uint32_t now = HAL_GetTick();
 
-  // each handler is gated on whichever wake source(s) are actually meaningful to it, so a plain
-  // SysTick-only wake (neither dio1 nor timer) is a safe no-op pass through the switch
   switch (mode) {
     case Mode::LISTENING:
       if (dio1_event) {
@@ -737,7 +603,7 @@ void AnchorBridge::step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag)
       }
       break;
     case Mode::RECOVER:
-      on_recover(irq, now);
+      on_recover(timer_event, now);
       break;
   }
 }

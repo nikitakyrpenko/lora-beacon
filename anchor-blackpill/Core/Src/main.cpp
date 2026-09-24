@@ -261,6 +261,11 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     anchor_bridge.step(DIO1_Callback_detected, TIM6_Callback_detected);
+
+    // feed the watchdog
+    if (anchor_bridge.failed_recovery_count() < RADIO_RECOVER_MAX_RETRIES + NRESET_RECOVER_MAX_RETRIES) {
+      HAL_IWDG_Refresh(&hiwdg);
+    }
     __WFI();
   }
 #endif  // BRINGUP_MODE
