@@ -28,7 +28,9 @@
 #include "cmsis_gcc.h"
 #include "stm32h5xx_hal_def.h"
 #include "stm32h5xx_hal_gpio.h"
+#include "stm32h5xx_hal_iwdg.h"
 #include "stm32h5xx_hal_spi.h"
+#include "stm32h5xx_hal_tim.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -57,13 +59,18 @@
 
 /* Private variables ---------------------------------------------------------*/
 
+IWDG_HandleTypeDef hiwdg;
+
 SPI_HandleTypeDef hspi3;
+
+TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
 
 volatile uint8_t DIO1_Callback_detected = 0;
+volatile uint8_t TIM6_Callback_detected = 0;
 
 /* USER CODE END PV */
 
@@ -73,6 +80,8 @@ static void MX_GPIO_Init(void);
 static void MX_ICACHE_Init(void);
 static void MX_SPI3_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_IWDG_Init(void);
+static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -169,6 +178,8 @@ int main(void)
   MX_ICACHE_Init();
   MX_SPI3_Init();
   MX_USART1_UART_Init();
+  MX_IWDG_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
 
 #if BRINGUP_MODE != 0
@@ -238,7 +249,7 @@ int main(void)
 #else
   /* USER CODE BEGIN 2-ORIG */
   static AnchorBridge anchor_bridge(
-    &hspi3, BUSY_GPIO_Port, NSS_GPIO_Port, NRESET_GPIO_Port, TCXOEN_GPIO_Port, BUSY_Pin, NSS_Pin, NRESET_Pin, TCXOEN_Pin);
+    &hspi3, &htim6, BUSY_GPIO_Port, NSS_GPIO_Port, NRESET_GPIO_Port, TCXOEN_GPIO_Port, BUSY_Pin, NSS_Pin, NRESET_Pin, TCXOEN_Pin);
 
   // the bridge starts in RECOVER, so its first step() configures the radio and moves to LISTENING
   /* USER CODE END 2 */
@@ -249,7 +260,12 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    anchor_bridge.step(DIO1_Callback_detected);
+    anchor_bridge.step(DIO1_Callback_detected, TIM6_Callback_detected);
+
+    // feed the watchdog
+    if (anchor_bridge.failed_recovery_count() < RADIO_RECOVER_MAX_RETRIES + NRESET_RECOVER_MAX_RETRIES) {
+      HAL_IWDG_Refresh(&hiwdg);
+    }
     __WFI();
   }
 #endif  // BRINGUP_MODE
@@ -387,6 +403,50 @@ static void MX_SPI3_Init(void)
 }
 
 /**
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
+{
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_1024;
+  hiwdg.Init.Window = 4095;
+  hiwdg.Init.Reload = 1874;
+  hiwdg.Init.EWI = 0;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK) {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief TIM6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM6_Init(void)
+{
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 31999;  // 32MHz APB1 timer clock -> 1kHz counter (1 count = 1ms)
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 65535;  // placeholder -- AnchorBridge::arm_deadline_ms() overwrites ARR per-arm at runtime
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK) {
+    Error_Handler();
+  }
+  if (HAL_TIM_OnePulse_Init(&htim6, TIM_OPMODE_SINGLE) != HAL_OK) {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK) {
+    Error_Handler();
+  }
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -512,6 +572,13 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == DIO1_Pin) {
     DIO1_Callback_detected = 1;
+  }
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
+{
+  if (htim->Instance == TIM6) {
+    TIM6_Callback_detected = 1;
   }
 }
 
