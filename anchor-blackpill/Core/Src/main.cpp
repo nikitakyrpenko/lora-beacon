@@ -29,6 +29,7 @@
 #include "stm32h5xx_hal_def.h"
 #include "stm32h5xx_hal_gpio.h"
 #include "stm32h5xx_hal_iwdg.h"
+#include "stm32h5xx_hal_pwr.h"
 #include "stm32h5xx_hal_spi.h"
 #include "stm32h5xx_hal_tim.h"
 /* USER CODE END Includes */
@@ -100,7 +101,7 @@ static void MX_TIM6_Init(void);
 static bool bringup_check_command_roundtrip(AnchorBridge& bridge)
 {
   const uint16_t mask = bridge.to_radio();
-  printf("[%lu]   to_radio mask=0x%03X (full=0x1FF)\r\n", (unsigned long)HAL_GetTick(), mask);
+  printf("[%lu]   to_radio mask=0x%03X (full=0x%03X)\r\n", (unsigned long)HAL_GetTick(), mask, RADIO_SUCCESS);
 
   SX1280Device::SX1280_Status sta{};
   const HAL_StatusTypeDef hal = bridge.get_status(&sta);
@@ -260,13 +261,20 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    anchor_bridge.step(DIO1_Callback_detected, TIM6_Callback_detected);
+    const Mode mode = anchor_bridge.step(DIO1_Callback_detected, TIM6_Callback_detected);
 
     // feed the watchdog
     if (anchor_bridge.failed_recovery_count() < RADIO_RECOVER_MAX_RETRIES + NRESET_RECOVER_MAX_RETRIES) {
       HAL_IWDG_Refresh(&hiwdg);
     }
-    __WFI();
+    // Fallback to deepsleep for power consumption reduce and wait event from DIO1 pin
+    if (mode == Mode::IDLE) {
+      HAL_PWR_EnterSTOPMode(PWR_MAINREGULATOR_ON, PWR_STOPENTRY_WFI);
+      SystemClock_Config();
+    }
+    else {
+      __WFI();
+    }
   }
 #endif  // BRINGUP_MODE
   /* USER CODE END 3 */

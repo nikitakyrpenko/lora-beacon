@@ -100,12 +100,21 @@ static constexpr uint8_t PERIOD_BASE_4_MS = 0x03;
 // Anchor idle-state duty cycle only (rover never calls SetRxDutyCycle). Original first-pass values (10ms RX /
 // 490ms sleep, ~2% duty) were validated on hardware and found too sparse against the beacon's short (~1ms)
 // wake-word preamble -- average ~45 beacon broadcasts (~227s) to catch one, confirmed empirically against the
-// theoretical duty-cycle-percentage model. Temporarily tightened to 10ms RX / 90ms sleep (100ms cycle, ~10% duty,
-// ~10 broadcasts / ~50s average wake latency) to unblock anchor+beacon bring-up. NOT a final tuned value --
-// revisit once wake latency / power draw can be measured together and weighed against extending the beacon's
-// preamble instead -- see PLAN.md Open Items.
-static constexpr uint16_t ANCHOR_IDLE_RX_PERIOD_BASE_COUNT = 10;
-static constexpr uint16_t ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT = 90;
+// theoretical duty-cycle-percentage model. Sized 2026-09-27 against the reworked beacon's session-based design
+// (vehicle-powered, tight discovery retry with no backoff while searching, ~150-225ms effective repeat interval):
+// 20ms RX / 10000ms sleep (~0.2% duty) -> expected ~75-112s average reacquisition, accepted as a rare cost (only
+// hit on cold start or after LISTENING's own LISTENING_GRACE_MS grace window already lapsed without contact) in
+// exchange for ~35,000:1 RX-vs-sleep current draw. Still needs real hardware confirmation, same as the original
+// bring-up values were -- see PLAN.md Open Items.
+static constexpr uint16_t ANCHOR_IDLE_RX_PERIOD_BASE_COUNT = 1000;
+static constexpr uint16_t ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT = 10000;
+// SetRxDutyCycle's 5-byte param blob [periodBase, rxCount MSB, rxCount LSB, sleepCount MSB, sleepCount LSB] --
+// shares PERIOD_BASE_1_MS with RX_CONTINUOUS_PARAMS below, just a different final SetRx* op/params pair.
+static constexpr uint8_t ANCHOR_IDLE_RX_DUTY_CYCLE_PARAMS[5] = {PERIOD_BASE_1_MS,
+                                                                static_cast<uint8_t>(ANCHOR_IDLE_RX_PERIOD_BASE_COUNT >> 8),
+                                                                static_cast<uint8_t>(ANCHOR_IDLE_RX_PERIOD_BASE_COUNT & 0xFF),
+                                                                static_cast<uint8_t>(ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT >> 8),
+                                                                static_cast<uint8_t>(ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT & 0xFF)};
 
 // IRQ bit positions (Table 11-71/13-6x), combined into SetDioIrqParams'/GetIrqStatus'/ClearIrqStatus' 16-bit masks
 static constexpr uint16_t IRQ_BIT_TX_DONE = static_cast<uint16_t>(1u << 0);
@@ -213,8 +222,12 @@ static constexpr uint8_t RANGING_RESULT_MUX_DEBIASED_WRITE[3] = {static_cast<uin
                                                                  static_cast<uint8_t>(REG_RANGING_RESULT_MUX & 0xFF),
                                                                  static_cast<uint8_t>(RANGING_RESULT_DEBIASED << 4)};
 
-// SetLongPreamble param (opcode SET_LONG_PREAMBLE_OP_CODE, 0x9B)
+// SetLongPreamble param (opcode SET_LONG_PREAMBLE_OP_CODE, 0x9B). Datasheet 11.5.6: "SetLongPreamble must be issued
+// prior to SetRxDutyCycle" -- without it, RxDutyCycle never extends its Rx window on a detected preamble (11.5.7),
+// so a packet whose airtime exceeds one raw Rx window is never actually received. Must explicitly disable again
+// before continuous RX, since it also alters SetTx/SetRx behavior while left enabled.
 static constexpr uint8_t LONG_PREAMBLE_ENABLE = 0x01;
+static constexpr uint8_t LONG_PREAMBLE_DISABLE = 0x00;
 
 }  // namespace SX1280_VALUES
 

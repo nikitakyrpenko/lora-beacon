@@ -65,13 +65,34 @@ uint16_t clamp_ranging_window(const AckPacketIn& ack)
 
 }  // namespace
 
+AnchorBridge::AnchorBridge(SPI_HandleTypeDef* SPI_port_,
+                           TIM_HandleTypeDef* TIM_timer_,
+                           GPIO_TypeDef* BUSY_GPIO_port_,
+                           GPIO_TypeDef* NSS_GPIO_port_,
+                           GPIO_TypeDef* NRESET_GPIO_port_,
+                           GPIO_TypeDef* TCXOEN_GPIO_port_,
+                           uint16_t BUSY_pin_,
+                           uint16_t NSS_pin_,
+                           uint16_t NRESET_pin_,
+                           uint16_t TCXOEN_pin_)
+  : device(SPI_port_, BUSY_GPIO_port_, NSS_GPIO_port_, NRESET_GPIO_port_, TCXOEN_GPIO_port_, BUSY_pin_, NSS_pin_, NRESET_pin_, TCXOEN_pin_)
+  , timer(TIM_timer_)
+{
+  if (device.NRESET_reset()) {
+    ANCHOR_LOG("[%lu] NRESET compeleted\r\n", (unsigned long)HAL_GetTick());
+  }
+
+  //initial setup need to manually trigget recover
+  try_recover(HAL_GetTick());
+}
+
 HAL_StatusTypeDef AnchorBridge::clear_irq_mask(SX1280Device::SX1280_Status* sta_out)
 {
   uint8_t CLEAR_IRQ_MASK[2] = {0xFF, 0xFF};
   return device.SPI_write(&SX1280_OPERATIONS::CLEAR_IRQ_STATUS_OP_CODE, CLEAR_IRQ_MASK, nullptr, 2, sta_out);
 }
 
-uint16_t AnchorBridge::to_radio()
+uint16_t AnchorBridge::to_radio(bool duty_cycle)
 {
   uint16_t mask = 0;
   SX1280Device::SX1280_Status sta{};
@@ -141,13 +162,30 @@ uint16_t AnchorBridge::to_radio()
   }
   mask |= (1u << 7);
 
-  // start listening indefinitely
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_RX_OP_CODE, LORA_BEACON_PROTOCOL::RX_CONTINUOUS_PARAMS, nullptr, 3, &sta);
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_LONG_PREAMBLE_OP_CODE,
+                         duty_cycle ? &SX1280_VALUES::LONG_PREAMBLE_ENABLE : &SX1280_VALUES::LONG_PREAMBLE_DISABLE,
+                         nullptr,
+                         1,
+                         &sta);
   if (!step_ok(hal, sta)) {
     log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 8);
+
+  // put Sx1280 into sniff mode with rx window and sleep
+  if (duty_cycle) {
+    hal =
+      device.SPI_write(&SX1280_OPERATIONS::SET_RX_DUTY_CYCLE_OP_CODE, SX1280_VALUES::ANCHOR_IDLE_RX_DUTY_CYCLE_PARAMS, nullptr, 5, &sta);
+  }
+  else {
+    hal = device.SPI_write(&SX1280_OPERATIONS::SET_RX_OP_CODE, LORA_BEACON_PROTOCOL::RX_CONTINUOUS_PARAMS, nullptr, 3, &sta);
+  }
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 9);
 
   return mask;
 }
@@ -251,6 +289,20 @@ uint16_t AnchorBridge::to_ranging()
   mask |= (1u << 10);
 
   return mask;
+}
+
+bool AnchorBridge::rearm_rx()
+{
+  SX1280Device::SX1280_Status sta{};
+
+  HAL_StatusTypeDef hal =
+    device.SPI_write(&SX1280_OPERATIONS::SET_RX_OP_CODE, LORA_BEACON_PROTOCOL::RX_CONTINUOUS_PARAMS, nullptr, 3, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, 0, hal, sta);
+    return false;
+  }
+
+  return true;
 }
 
 uint16_t AnchorBridge::send_ack()
@@ -373,6 +425,8 @@ HAL_StatusTypeDef AnchorBridge::get_irq_mask(uint16_t* mask_out)
 
 void AnchorBridge::arm_timer(uint32_t ms)
 {
+  HAL_TIM_Base_Stop_IT(timer);
+
   __HAL_TIM_CLEAR_FLAG(timer, TIM_FLAG_UPDATE);
   __HAL_TIM_SET_COUNTER(timer, 0);
   __HAL_TIM_SET_AUTORELOAD(timer, ms - 1);
@@ -388,11 +442,31 @@ void AnchorBridge::try_recover(uint32_t tick)
 {
   mode = Mode::RECOVER;
   ANCHOR_LOG("[%lu] entering RECOVER\r\n", (unsigned long)tick);
-  arm_timer(1);  // trigger timer
+  arm_timer(10);  // trigger timer
 }
 
-void AnchorBridge::on_listen(uint16_t irq, uint32_t tick)
+void AnchorBridge::on_idle(uint16_t irq, bool timer_event, uint32_t tick)
 {
+  if (irq & SX1280_VALUES::IRQ_BIT_RX_DONE) {
+    on_listen(irq, timer_event, tick);
+  }
+}
+
+void AnchorBridge::on_listen(uint16_t irq, bool timer_event, uint32_t tick)
+{
+  // listening window expired -> fallback to IDLE's power-saving duty-cycle RX
+  if (timer_event) {
+    disarm_timer();
+    if (to_radio(/*duty_cycle=*/true) != RADIO_SUCCESS) {
+      ANCHOR_LOG("[%lu] on_listen: to_radio(duty_cycle) failed\r\n", (unsigned long)tick);
+      try_recover(tick);
+      return;
+    }
+    mode = Mode::IDLE;
+    ANCHOR_LOG("[%lu] on_listen: LISTEN window expired\r\n", (unsigned long)tick);
+    return;
+  }
+
   // a corrupted packet still ends the single-shot RX, so each error is its own way to RECOVER (which re-arms RX)
   if (irq & SX1280_VALUES::IRQ_BIT_HEADER_ERROR) {
     ANCHOR_LOG("[%lu] on_listen: header error (irq=0x%X)\r\n", (unsigned long)tick, irq);
@@ -423,7 +497,11 @@ void AnchorBridge::on_listen(uint16_t irq, uint32_t tick)
       }
       else {
         ANCHOR_LOG("[%lu] on_listen: wake_word mismatch (irq=0x%X)\r\n", (unsigned long)tick, irq);
-        try_recover(tick);
+        if (mode == Mode::IDLE) {
+          mode = Mode::LISTENING;
+          arm_timer(ACK_LISTENING_WINDOW_MS);
+        }
+        rearm_rx();
         return;
       }
     }
@@ -472,58 +550,52 @@ void AnchorBridge::on_ack_done(uint16_t irq, uint32_t tick)
 
   // the ranging window starts once the slave is armed
   mode = Mode::RANGING;
+  arm_timer(RANGING_REQUEST_TIMEOUT_MS);
   ANCHOR_LOG("[%lu] entering RANGING\r\n", (unsigned long)tick);
-  arm_timer(latch.ranging);
 }
 
 void AnchorBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)
 {
-  // the slave ranging response has left the antenna
-  if (irq & SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE) {
-    disarm_timer();
-
-    if (to_radio() != RADIO_SUCCESS) {
+  // this block triggered by timer, no ranging request done in RANGING_REQUEST_TIMEOUT_MS period or latch.ranging -> fallback to radio
+  if (timer_event) {
+    const uint16_t r = to_radio();
+    if (r != RADIO_SUCCESS) {
+      ANCHOR_LOG(
+        "[%lu] on_ranging: fallback to_radio on ACK_RESPONSE_MS failed mask=0x%X (full=0x%X)\r\n", (unsigned long)tick, r, RANGING_SUCCESS);
       try_recover(tick);
       return;
     }
     mode = Mode::LISTENING;
-    ANCHOR_LOG("[%lu] entering LISTENING\r\n", (unsigned long)tick);
+    arm_timer(ACK_LISTENING_WINDOW_MS);
+    ANCHOR_LOG("[%lu] RANGING window expired, fallback to LISTENING\r\n", (unsigned long)tick);
     return;
   }
 
-  // the request was discarded
-  if (irq & SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_REQUEST_DISCARD) {
+  // the slave ranging response has left the antenna or was discarded
+  if (irq & SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE || irq & SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_REQUEST_DISCARD) {
     disarm_timer();
-
-    ANCHOR_LOG("[%lu] on_ranging: request discarded (irq=0x%X)\r\n", (unsigned long)tick, irq);
-    try_recover(tick);
-    return;
-  }
-
-  if (!timer_event) {
-    // MASTER_REQUEST_VALID is the normal first event of an exchange, nothing to do; anything else is unexpected but not fatal
-    if (irq & static_cast<uint16_t>(~SX1280_VALUES::IRQ_BIT_RANGING_MASTER_REQUEST_VALID)) {
-      ANCHOR_LOG("[%lu] on_ranging: unexpected irq bits set (irq=0x%X)\r\n", (unsigned long)tick, irq);
+    arm_timer(latch.ranging);
+    if (!rearm_rx()) {
+      try_recover(tick);
+      return;
     }
+    mode = Mode::RANGING;
+    ANCHOR_LOG("[%lu] refresh RANGING window\r\n", (unsigned long)tick);
     return;
   }
 
-  // window closed without a finished exchange -> fall back to radio
-  if (to_radio() != RADIO_SUCCESS) {
-    try_recover(tick);
-    return;
+  // MASTER_REQUEST_VALID is the normal first event of an exchange, nothing to do; anything else is unexpected but not fatal
+  if (irq & static_cast<uint16_t>(~SX1280_VALUES::IRQ_BIT_RANGING_MASTER_REQUEST_VALID)) {
+    ANCHOR_LOG("[%lu] on_ranging: unexpected irq bits set (irq=0x%X)\r\n", (unsigned long)tick, irq);
   }
-  ANCHOR_LOG("[%lu] on_ranging: window closed without a response\r\n", (unsigned long)tick);
-  mode = Mode::LISTENING;
-  ANCHOR_LOG("[%lu] entering LISTENING\r\n", (unsigned long)tick);
 }
 
 void AnchorBridge::recover_success(uint32_t tick)
 {
-  disarm_timer();
   recover.count = 0;
   mode = Mode::LISTENING;
-  ANCHOR_LOG("[%lu] entering LISTENING\r\n", (unsigned long)tick);
+  arm_timer(ACK_LISTENING_WINDOW_MS);
+  ANCHOR_LOG("[%lu] recovered LISTENING\r\n", (unsigned long)tick);
 }
 
 void AnchorBridge::recover_retry(uint32_t tick, const char* reason)
@@ -560,7 +632,7 @@ void AnchorBridge::on_recover(bool tim_event, uint32_t tick)
   recover_retry(tick, "NRESET");
 }
 
-void AnchorBridge::step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag)
+Mode AnchorBridge::step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag)
 {
   // one place reads and clears the IRQ status; the handlers get the result as a parameter
   uint16_t irq = 0;
@@ -583,8 +655,8 @@ void AnchorBridge::step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag)
 
   switch (mode) {
     case Mode::LISTENING:
-      if (dio1_event) {
-        on_listen(irq, now);
+      if (dio1_event || timer_event) {
+        on_listen(irq, timer_event, now);
       }
       break;
     case Mode::ACK_REQUESTED:
@@ -605,5 +677,12 @@ void AnchorBridge::step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag)
     case Mode::RECOVER:
       on_recover(timer_event, now);
       break;
+    case Mode::IDLE:
+      if (dio1_event || timer_event) {
+        on_idle(irq, timer_event, now);
+      }
+      break;
   }
+
+  return mode;
 }

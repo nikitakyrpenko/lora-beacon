@@ -22,15 +22,17 @@ static constexpr uint32_t ACK_SLOT_DELAY_MS =
   (ANCHOR_ADDRESS - LORA_BEACON_PROTOCOL::RANGING_ADDRESS_BLOCK_BASE) * LORA_BEACON_PROTOCOL::ANCHOR_ACK_SLOT_WIDTH_MS;
 
 static constexpr uint32_t RECOVERY_DELAY_MS = 1000;
+static constexpr uint32_t RANGING_REQUEST_TIMEOUT_MS = 500;
+static constexpr uint32_t ACK_LISTENING_WINDOW_MS = 5000;
 
 static constexpr uint8_t RADIO_RECOVER_MAX_RETRIES = 10;
 static constexpr uint8_t NRESET_RECOVER_MAX_RETRIES = 5;
 
-static constexpr uint16_t RADIO_SUCCESS = 0x1FF;
+static constexpr uint16_t RADIO_SUCCESS = 0x3FF;
 static constexpr uint16_t RANGING_SUCCESS = 0x7FF;
 static constexpr uint16_t ACK_SUCCESS = 0xF;
 
-enum class Mode { LISTENING, RANGING, ACK_REQUESTED, ACK_IN_PROGRESS, RECOVER };
+enum class Mode { IDLE, LISTENING, RANGING, ACK_REQUESTED, ACK_IN_PROGRESS, RECOVER };
 
 class AnchorBridge {
   //represents how much time can anchor spend in mode i.e. window durations
@@ -54,20 +56,17 @@ public:
                uint16_t BUSY_pin_,
                uint16_t NSS_pin_,
                uint16_t NRESET_pin_,
-               uint16_t TCXOEN_pin_)
-    : device(
-        SPI_port_, BUSY_GPIO_port_, NSS_GPIO_port_, NRESET_GPIO_port_, TCXOEN_GPIO_port_, BUSY_pin_, NSS_pin_, NRESET_pin_, TCXOEN_pin_)
-    , timer(TIM_timer_)
-  {
-    device.NRESET_reset();
-  }
+               uint16_t TCXOEN_pin_);
 
   inline Mode get_mode() { return mode; }
   inline uint8_t failed_recovery_count() { return recover.count; }
 
-  void step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag);
+  Mode step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag);
 
-  uint16_t to_radio();
+  // final step is either continuous RX (default, used by LISTENING/recovery) or IDLE's power-saving duty-cycle
+  // sniff RX -- every earlier step (standby, packet type, frequency, buffer, modulation, fixup, packet params,
+  // IRQ mask) is identical either way, so this is a parameter rather than a near-duplicate function
+  uint16_t to_radio(bool duty_cycle = false);
   uint16_t send_ack();
 
   HAL_StatusTypeDef get_status(SX1280Device::SX1280_Status* sta_out);
@@ -92,7 +91,8 @@ private:
   void recover_retry(uint32_t tick, const char* reason);
 
   // state handlers
-  void on_listen(uint16_t irq, uint32_t hal_tick);
+  void on_idle(uint16_t irq, bool timer_event, uint32_t hal_tick);
+  void on_listen(uint16_t irq, bool timer_event, uint32_t hal_tick);
   void on_ack_requested(uint16_t irq, uint32_t hal_tick);
   void on_ack_in_progress(uint16_t irq, uint32_t hal_tick);
   void on_ack_done(uint16_t irq, uint32_t hal_tick);
@@ -100,6 +100,9 @@ private:
   void on_recover(bool timer_event, uint32_t hal_tick);
 
   uint16_t to_ranging();
+  // re-arms RX without redoing the rest of a mode's config -- radio/ranging keep identical packet params, addresses,
+  // and IRQ routing between exchanges, so only SetRx needs reissuing; protocol-agnostic, not ranging-specific
+  bool rearm_rx();
 
   std::optional<AckPacketIn> get_ack_packet();
 
