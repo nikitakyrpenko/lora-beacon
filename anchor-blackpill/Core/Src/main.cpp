@@ -29,6 +29,7 @@
 #include "stm32h5xx_hal_def.h"
 #include "stm32h5xx_hal_gpio.h"
 #include "stm32h5xx_hal_iwdg.h"
+#include "stm32h5xx_hal_lptim.h"
 #include "stm32h5xx_hal_pwr.h"
 #include "stm32h5xx_hal_spi.h"
 #include "stm32h5xx_hal_tim.h"
@@ -68,6 +69,8 @@ TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart1;
 
+LPTIM_HandleTypeDef hlptim1;
+
 /* USER CODE BEGIN PV */
 
 volatile uint8_t DIO1_Callback_detected = 0;
@@ -83,6 +86,7 @@ static void MX_SPI3_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_IWDG_Init(void);
 static void MX_TIM6_Init(void);
+static void MX_LPTIM1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -181,6 +185,11 @@ int main(void)
   MX_USART1_UART_Init();
   MX_IWDG_Init();
   MX_TIM6_Init();
+  MX_LPTIM1_Init();
+
+  if (HAL_LPTIM_Counter_Start_IT(&hlptim1) != HAL_OK) {
+    Error_Handler();
+  }
   /* USER CODE BEGIN 2 */
 
 #if BRINGUP_MODE != 0
@@ -299,10 +308,11 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_CSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_CSI | RCC_OSCILLATORTYPE_LSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSIDiv = RCC_HSI_DIV2;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.CSIState = RCC_CSI_ON;
   RCC_OscInitStruct.CSICalibrationValue = RCC_CSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -450,6 +460,22 @@ static void MX_TIM6_Init(void)
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
   if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK) {
+    Error_Handler();
+  }
+}
+
+static void MX_LPTIM1_Init(void)
+{
+  hlptim1.Instance = LPTIM1;
+  hlptim1.Init.Clock.Source = LPTIM_CLOCKSOURCE_APBCLOCK_LPOSC;
+  hlptim1.Init.Clock.Prescaler = LPTIM_PRESCALER_DIV8;
+  hlptim1.Init.Trigger.Source = LPTIM_TRIGSOURCE_SOFTWARE;
+  hlptim1.Init.Period = 40000;  // LSI/8 = 4kHz -> 40000 counts = 10s watchdog-feed wake period
+  hlptim1.Init.UpdateMode = LPTIM_UPDATE_IMMEDIATE;
+  hlptim1.Init.CounterSource = LPTIM_COUNTERSOURCE_INTERNAL;
+  hlptim1.Init.Input1Source = LPTIM_INPUT1SOURCE_GPIO;
+  hlptim1.Init.RepetitionCounter = 0;
+  if (HAL_LPTIM_Init(&hlptim1) != HAL_OK) {
     Error_Handler();
   }
 }

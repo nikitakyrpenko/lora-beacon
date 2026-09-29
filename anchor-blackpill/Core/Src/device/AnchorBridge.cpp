@@ -162,11 +162,7 @@ uint16_t AnchorBridge::to_radio(bool duty_cycle)
   }
   mask |= (1u << 7);
 
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_LONG_PREAMBLE_OP_CODE,
-                         duty_cycle ? &SX1280_VALUES::LONG_PREAMBLE_ENABLE : &SX1280_VALUES::LONG_PREAMBLE_DISABLE,
-                         nullptr,
-                         1,
-                         &sta);
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_LONG_PREAMBLE_OP_CODE, &SX1280_VALUES::LONG_PREAMBLE_DISABLE, nullptr, 1, &sta);
   if (!step_ok(hal, sta)) {
     log_step_failure(__func__, mask, hal, sta);
     return mask;
@@ -445,11 +441,20 @@ void AnchorBridge::try_recover(uint32_t tick)
   arm_timer(10);  // trigger timer
 }
 
-void AnchorBridge::on_idle(uint16_t irq, bool timer_event, uint32_t tick)
+void AnchorBridge::on_idle(bool dio1_event, uint32_t tick)
 {
-  if (irq & SX1280_VALUES::IRQ_BIT_RX_DONE) {
-    on_listen(irq, timer_event, tick);
+  if (!dio1_event) {
+    return;
   }
+
+  // hack to call reset on the SX1280 chip after DIO1 trigger done
+  if (device.NRESET_reset() && to_radio() == RADIO_SUCCESS) {
+    mode = Mode::LISTENING;
+    arm_timer(ACK_LISTENING_WINDOW_MS);
+    ANCHOR_LOG("[%lu] on_idle: duty-cycle wake, reset radio, LISTENING\r\n", (unsigned long)tick);
+    return;
+  }
+  try_recover(tick);
 }
 
 void AnchorBridge::on_listen(uint16_t irq, bool timer_event, uint32_t tick)
@@ -679,7 +684,7 @@ Mode AnchorBridge::step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag)
       break;
     case Mode::IDLE:
       if (dio1_event || timer_event) {
-        on_idle(irq, timer_event, now);
+        on_idle(dio1_event, now);
       }
       break;
   }

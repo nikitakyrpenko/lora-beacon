@@ -107,7 +107,7 @@ static constexpr uint8_t PERIOD_BASE_4_MS = 0x03;
 // exchange for ~35,000:1 RX-vs-sleep current draw. Still needs real hardware confirmation, same as the original
 // bring-up values were -- see PLAN.md Open Items.
 static constexpr uint16_t ANCHOR_IDLE_RX_PERIOD_BASE_COUNT = 1000;
-static constexpr uint16_t ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT = 10000;
+static constexpr uint16_t ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT = 5000;
 // SetRxDutyCycle's 5-byte param blob [periodBase, rxCount MSB, rxCount LSB, sleepCount MSB, sleepCount LSB] --
 // shares PERIOD_BASE_1_MS with RX_CONTINUOUS_PARAMS below, just a different final SetRx* op/params pair.
 static constexpr uint8_t ANCHOR_IDLE_RX_DUTY_CYCLE_PARAMS[5] = {PERIOD_BASE_1_MS,
@@ -222,11 +222,9 @@ static constexpr uint8_t RANGING_RESULT_MUX_DEBIASED_WRITE[3] = {static_cast<uin
                                                                  static_cast<uint8_t>(REG_RANGING_RESULT_MUX & 0xFF),
                                                                  static_cast<uint8_t>(RANGING_RESULT_DEBIASED << 4)};
 
-// SetLongPreamble param (opcode SET_LONG_PREAMBLE_OP_CODE, 0x9B). Datasheet 11.5.6: "SetLongPreamble must be issued
-// prior to SetRxDutyCycle" -- without it, RxDutyCycle never extends its Rx window on a detected preamble (11.5.7),
-// so a packet whose airtime exceeds one raw Rx window is never actually received. Must explicitly disable again
-// before continuous RX, since it also alters SetTx/SetRx behavior while left enabled.
-static constexpr uint8_t LONG_PREAMBLE_ENABLE = 0x01;
+// SetLongPreamble param (opcode SET_LONG_PREAMBLE_OP_CODE, 0x9B), kept explicitly disabled: enabling it makes
+// RxDutyCycle extend its Rx window by SleepPeriod + 2*RxPeriod on ANY detected preamble, including a false one
+// from noise -- not worth it since every packet here fits inside one Rx window (no split-packet reception needed).
 static constexpr uint8_t LONG_PREAMBLE_DISABLE = 0x00;
 
 }  // namespace SX1280_VALUES

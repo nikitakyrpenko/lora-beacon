@@ -25,7 +25,7 @@ static constexpr uint32_t RECOVERY_DELAY_MS = 1000;
 static constexpr uint32_t RANGING_REQUEST_TIMEOUT_MS = 500;
 static constexpr uint32_t ACK_LISTENING_WINDOW_MS = 5000;
 
-static constexpr uint8_t RADIO_RECOVER_MAX_RETRIES = 10;
+static constexpr uint8_t RADIO_RECOVER_MAX_RETRIES = 1;
 static constexpr uint8_t NRESET_RECOVER_MAX_RETRIES = 5;
 
 static constexpr uint16_t RADIO_SUCCESS = 0x3FF;
@@ -91,7 +91,7 @@ private:
   void recover_retry(uint32_t tick, const char* reason);
 
   // state handlers
-  void on_idle(uint16_t irq, bool timer_event, uint32_t hal_tick);
+  void on_idle(bool dio1_event, uint32_t hal_tick);
   void on_listen(uint16_t irq, bool timer_event, uint32_t hal_tick);
   void on_ack_requested(uint16_t irq, uint32_t hal_tick);
   void on_ack_in_progress(uint16_t irq, uint32_t hal_tick);
