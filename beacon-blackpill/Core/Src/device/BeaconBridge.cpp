@@ -165,7 +165,7 @@ uint16_t BeaconBridge::to_radio()
 
 uint16_t BeaconBridge::send_wake_broadcast()
 {
-  constexpr uint16_t ranging_window_ms = static_cast<uint16_t>(LORA_BEACON_PROTOCOL::RANGING_WINDOW_MS);
+  constexpr uint16_t ranging_window_ms = static_cast<uint16_t>(LORA_BEACON_PROTOCOL::DEFAULT_RANGING_WINDOW_MS);
   uint8_t write_buffer[1 + LORA_BEACON_PROTOCOL::WAKE_PAYLOAD_LEN] = {0x00,  // buffer offset
                                                                       LORA_BEACON_PROTOCOL::WAKE_WORD[0],
                                                                       LORA_BEACON_PROTOCOL::WAKE_WORD[1],
@@ -351,16 +351,17 @@ bool BeaconBridge::wake_ack_matched(AckPacket* ack_out, bool rearm_listen)
   // check the ack magic matches
   for (uint8_t i = 0; i < MAGIC_LEN; ++i) {
     if (payload[i] != LORA_BEACON_PROTOCOL::WAKE_ACK[i]) {
-      BEACON_LOG("[%lu] wake_ack_matched: magic mismatch at byte %u got=0x%02X want=0x%02X (buffer start=%u, first bytes %02X %02X %02X %02X)\r\n",
-                 (unsigned long)HAL_GetTick(),
-                 i,
-                 payload[i],
-                 LORA_BEACON_PROTOCOL::WAKE_ACK[i],
-                 static_cast<unsigned>(beg),
-                 payload[0],
-                 payload[1],
-                 payload[2],
-                 payload[3]);
+      BEACON_LOG(
+        "[%lu] wake_ack_matched: magic mismatch at byte %u got=0x%02X want=0x%02X (buffer start=%u, first bytes %02X %02X %02X %02X)\r\n",
+        (unsigned long)HAL_GetTick(),
+        i,
+        payload[i],
+        LORA_BEACON_PROTOCOL::WAKE_ACK[i],
+        static_cast<unsigned>(beg),
+        payload[0],
+        payload[1],
+        payload[2],
+        payload[3]);
       return false;
     }
   }
