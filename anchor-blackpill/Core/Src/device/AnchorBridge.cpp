@@ -147,7 +147,11 @@ uint16_t AnchorBridge::to_radio(bool duty_cycle)
   mask |= (1u << 5);
 
   // configure packet params to expect a wake-payload-sized packet
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE, LORA_BEACON_PROTOCOL::WAKE_PACKET_PARAMS, nullptr, 7, &sta);
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE,
+                         LORA_BEACON_PROTOCOL::WAKE_PACKET_PARAM_PAY,
+                         nullptr,
+                         LORA_BEACON_PROTOCOL::WAKE_PACKET_PARAM_LEN,
+                         &sta);
   if (!step_ok(hal, sta)) {
     log_step_failure(__func__, mask, hal, sta);
     return mask;
@@ -475,7 +479,7 @@ void AnchorBridge::on_listen(uint16_t irq, bool timer_event, uint32_t tick)
   // a corrupted packet still ends the single-shot RX, so each error is its own way to RECOVER (which re-arms RX)
   if (irq & SX1280_VALUES::IRQ_BIT_HEADER_ERROR) {
     ANCHOR_LOG("[%lu] on_listen: header error (irq=0x%X)\r\n", (unsigned long)tick, irq);
-    try_recover(tick);
+    rearm_rx();
     return;
   }
 
@@ -589,10 +593,19 @@ void AnchorBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)
     return;
   }
 
-  // MASTER_REQUEST_VALID is the normal first event of an exchange, nothing to do; anything else is unexpected but not fatal
-  if (irq & static_cast<uint16_t>(~SX1280_VALUES::IRQ_BIT_RANGING_MASTER_REQUEST_VALID)) {
-    ANCHOR_LOG("[%lu] on_ranging: unexpected irq bits set (irq=0x%X)\r\n", (unsigned long)tick, irq);
+  // a request whose header could not be decoded (noise, collision) ended the single-shot RX: listen again. The ranging window is
+  // deliberately not refreshed, so noise alone can't keep the anchor armed after the beacon has gone.
+  if (irq & SX1280_VALUES::IRQ_BIT_HEADER_ERROR) {
+    if (!rearm_rx()) {
+      try_recover(tick);
+      return;
+    }
+    ANCHOR_LOG("[%lu] on_ranging: header error, RX re-armed (irq=0x%X)\r\n", (unsigned long)tick, irq);
+    return;
   }
+
+  // nothing to do; anything else is unexpected but not fatal
+  ANCHOR_LOG("[%lu] on_ranging: unexpected irq bits set (irq=0x%X)\r\n", (unsigned long)tick, irq);
 }
 
 void AnchorBridge::recover_success(uint32_t tick)

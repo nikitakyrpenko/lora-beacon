@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 
 #include "AckPacket.hpp"
@@ -18,5 +19,17 @@ struct AckPacketIn {
 
     ack.ranging_window_ms = ByteOrder::get_u16(buf + LORA_BEACON_PROTOCOL::WAKE_WORD_LEN);
     return ack;
+  }
+
+  inline bool serialize(uint8_t* buf, uint8_t len) const
+  {
+    if (len < LORA_BEACON_PROTOCOL::WAKE_PAYLOAD_LEN) {
+      return false;
+    }
+
+    buf[0] = wake_word[0];
+    buf[1] = wake_word[1];
+    ByteOrder::put_u16(buf + 2, ranging_window_ms);
+    return true;
   }
 };

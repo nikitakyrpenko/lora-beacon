@@ -1,8 +1,12 @@
 #include <array>
 #include <cstdint>
+#include <optional>
 
 #include "BeaconBridge.hpp"
+#include "AckPacket.hpp"
+#include "AckPacketIn.hpp"
 #include "ByteOrder.hpp"
+#include "RangeEntry.hpp"
 #include "SX1280Constants.hpp"
 #include "stm32h5xx_hal_def.h"
 
@@ -15,21 +19,13 @@
 #define BEACON_LOG(...)
 #endif
 
-#define BEACON_LOG_STEP_FAIL(hal, sta, mask)                                                \
-  BEACON_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n", \
-             (unsigned long)HAL_GetTick(),                                                  \
-             __func__,                                                                      \
-             static_cast<int>(hal),                                                         \
-             static_cast<int>((sta).circuit_mode),                                          \
-             static_cast<int>((sta).command_status),                                        \
-             static_cast<int>((sta).busy),                                                  \
-             mask)
-
 // Bitmask a multi-step method returns success results
-static constexpr uint16_t TO_RADIO_FULL_MASK = (1u << 9) - 1;
-static constexpr uint16_t SEND_WAKE_BROADCAST_FULL_MASK = (1u << 2) - 1;
-static constexpr uint16_t LISTEN_FOR_ACK_FULL_MASK = (1u << 3) - 1;
-static constexpr uint16_t TO_RANGING_MASTER_FULL_MASK = (1u << 10) - 1;
+static constexpr uint16_t TO_RADIO_FULL_MASK = (1u << 7) - 1;
+static constexpr uint16_t TO_RANGING_FULL_MASK = (1u << 9) - 1;
+static constexpr uint16_t SEND_ACK_REQUEST_FULL_MASK = (1u << 4) - 1;
+static constexpr uint16_t ACK_LISTEN_FULL_MASK = (1u << 3) - 1;
+static constexpr uint16_t START_RANGING_FULL_MASK = (1u << 2) - 1;
+static constexpr uint16_t GET_RANGING_RESULT_FULL_MASK = (1u << 7) - 1;
 
 namespace {
 
@@ -42,6 +38,17 @@ bool step_ok(HAL_StatusTypeDef hal, const SX1280Device::SX1280_Status& sta)
                            sta.command_status == SX1280Device::CommandStatus::COMMAND_TIMEOUT);
 }
 
+void log_step_failure(const char* func, uint16_t mask, HAL_StatusTypeDef hal, const SX1280Device::SX1280_Status& sta)
+{
+  BEACON_LOG("[%lu] %s failed: hal=%d circuit_mode=%d cmd_status=%d busy=%d mask=0x%X\r\n",
+             (unsigned long)HAL_GetTick(),
+             func,
+             static_cast<int>(hal),
+             static_cast<int>(sta.circuit_mode),
+             static_cast<int>(sta.command_status),
+             static_cast<int>(sta.busy),
+             mask);
+}
 }  // namespace
 
 HAL_StatusTypeDef BeaconBridge::get_status(SX1280Device::SX1280_Status* sta_out)
@@ -77,8 +84,6 @@ HAL_StatusTypeDef BeaconBridge::clear_irq_mask(SX1280Device::SX1280_Status* sta_
 
 uint16_t BeaconBridge::to_radio()
 {
-  mode = MODE::NONE;
-
   uint16_t mask = 0;
   SX1280Device::SX1280_Status sta{};
   HAL_StatusTypeDef hal;
@@ -86,7 +91,7 @@ uint16_t BeaconBridge::to_radio()
   // drop to standby before reconfiguring
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_STANDBY_OP_CODE, &SX1280_VALUES::STDBY_RC_STAND_BY, nullptr, 1, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 0);
@@ -94,7 +99,7 @@ uint16_t BeaconBridge::to_radio()
   // select LoRa packet type
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_TYPE_OP_CODE, &SX1280_VALUES::PACKET_TYPE_LORA, nullptr, 1, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 1);
@@ -102,7 +107,7 @@ uint16_t BeaconBridge::to_radio()
   // set carrier frequency
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_FREQUENCY_OP_CODE, SX1280_VALUES::RF_FREQUENCY_BYTES, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 2);
@@ -110,7 +115,7 @@ uint16_t BeaconBridge::to_radio()
   // set TX/RX buffer base addresses
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_BUFFER_BASE_ADDRESS_OP_CODE, SX1280_VALUES::BUFFER_BASE_ADDRESS, nullptr, 2, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 3);
@@ -118,7 +123,7 @@ uint16_t BeaconBridge::to_radio()
   // set SF7/BW1600/CR4·5 modulation
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_MODULATION_OP_CODE, SX1280_VALUES::MODULATION_PARAMS_SF7, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 4);
@@ -126,111 +131,192 @@ uint16_t BeaconBridge::to_radio()
   // required register fixup for SF7/SF8
   hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::SF_7_FIXUP_WRITE, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 5);
 
-  // configure packet params for a wake-payload-sized packet
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE, LORA_BEACON_PROTOCOL::WAKE_PACKET_PARAMS, nullptr, 7, &sta);
+  // set TX output power + ramp time
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_TX_PARAMS_OP_CODE, SX1280_VALUES::TX_PARAMS, nullptr, 2, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 6);
 
-  // route TxDone interrupt to DIO1
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, LORA_BEACON_PROTOCOL::TX_DONE_IRQ_MASK, nullptr, 8, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 7);
-
-  // set TX output power + ramp time
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_TX_PARAMS_OP_CODE, SX1280_VALUES::TX_PARAMS, nullptr, 2, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 8);
-
-  if (mask == TO_RADIO_FULL_MASK) {
-    this->mode = MODE::RADIO;
-    BEACON_LOG("[%lu] entering RADIO\r\n", (unsigned long)HAL_GetTick());
-  }
+  mode = Mode::RADIO;
+  BEACON_LOG("[%lu] entering RADIO\r\n", (unsigned long)HAL_GetTick());
 
   return mask;
 }
 
-uint16_t BeaconBridge::send_wake_broadcast()
+uint16_t BeaconBridge::to_ranging()
 {
-  constexpr uint16_t ranging_window_ms = static_cast<uint16_t>(LORA_BEACON_PROTOCOL::DEFAULT_RANGING_WINDOW_MS);
-  uint8_t write_buffer[1 + LORA_BEACON_PROTOCOL::WAKE_PAYLOAD_LEN] = {0x00,  // buffer offset
-                                                                      LORA_BEACON_PROTOCOL::WAKE_WORD[0],
-                                                                      LORA_BEACON_PROTOCOL::WAKE_WORD[1],
-                                                                      static_cast<uint8_t>(ranging_window_ms >> 8),
-                                                                      static_cast<uint8_t>(ranging_window_ms & 0xFF)};
-
   uint16_t mask = 0;
   SX1280Device::SX1280_Status sta{};
   HAL_StatusTypeDef hal;
 
-  // write the wake magic + ranging-window duration into the TX buffer
-  hal =
-    device.SPI_write(&SX1280_OPERATIONS::WRITE_BUFFER_OP_CODE, write_buffer, nullptr, static_cast<uint16_t>(sizeof(write_buffer)), &sta);
+  // select ranging packet type
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_TYPE_OP_CODE, &SX1280_VALUES::PACKET_TYPE_RANGING, nullptr, 1, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 0);
 
-  // transmit (single-shot, auto-standby on TxDone)
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_TX_OP_CODE, LORA_BEACON_PROTOCOL::TX_SINGLE_SHOT_PARAMS, nullptr, 3, &sta);
+  // set carrier frequency
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_FREQUENCY_OP_CODE, SX1280_VALUES::RF_FREQUENCY_BYTES, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 1);
 
-  BEACON_LOG("[%lu] send_wake_broadcast mask=0x%X (full=0x%X)\r\n", (unsigned long)HAL_GetTick(), mask, SEND_WAKE_BROADCAST_FULL_MASK);
+  // set SF7/BW1600/CR4·5 modulation
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_MODULATION_OP_CODE, SX1280_VALUES::MODULATION_PARAMS_SF7, nullptr, 3, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 2);
+
+  // required register fixup for SF7/SF8
+  hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::SF_7_FIXUP_WRITE, nullptr, 3, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 3);
+
+  // configure packet params for the ranging exchange
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE, SX1280_VALUES::RANGING_PACKET_PARAMS, nullptr, 7, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 4);
+
+  // set ranging address check length (must match the anchor's)
+  hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::RANGING_ADDR_CHECK_LEN_8BIT, nullptr, 3, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 5);
+
+  // write RxTx-delay calibration offset
+  hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::RANGING_CALIBRATION_WRITE, nullptr, 4, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 6);
+
+  // set ranging role to master
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_RANGING_ROLE_OP_CODE, &SX1280_VALUES::RANGING_ROLE_MASTER, nullptr, 1, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 7);
+
+  // route ranging interrupts to DIO1 (RANGING_MASTER_RESULT_VALID + RANGING_MASTER_TIMEOUT); the same for every anchor, so set once
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, SX1280_VALUES::RANGING_MASTER_IRQ_MASK, nullptr, 8, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 8);
+
+  BEACON_LOG("[%lu] entering RANGING\r\n", (unsigned long)HAL_GetTick());
 
   return mask;
 }
 
-bool BeaconBridge::was_tx_done()
+uint8_t BeaconBridge::send_ack_request(const AckPacketIn* ack_request)
 {
-  uint16_t irq_mask = 0;
-  if (this->get_irq_mask(&irq_mask) != HAL_OK) {
-    return false;
-  }
-
-  SX1280Device::SX1280_Status clear_sta{};
-  this->clear_irq_mask(&clear_sta);
-
-  return (irq_mask & SX1280_VALUES::IRQ_BIT_TX_DONE) != 0;
-}
-
-uint16_t BeaconBridge::listen_for_ack()
-{
-  mode = MODE::NONE;
-
   uint16_t mask = 0;
   SX1280Device::SX1280_Status sta{};
   HAL_StatusTypeDef hal;
 
-  // Reuses the frequency/modulation
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE, LORA_BEACON_PROTOCOL::WAKE_ACK_PACKET_PARAMS, nullptr, 7, &sta);
+  // set packet parameters for ack tx
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE,
+                         LORA_BEACON_PROTOCOL::WAKE_PACKET_PARAM_PAY,
+                         nullptr,
+                         LORA_BEACON_PROTOCOL::WAKE_PACKET_PARAM_LEN,
+                         &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 0);
 
-  // route RxDone + RxTxTimeout interrupts to DIO1
+  // write the wake word + ranging-window duration into the TX buffer
+  constexpr uint8_t WRITE_BUFFER_SIZE = 1 + LORA_BEACON_PROTOCOL::WAKE_PAYLOAD_LEN;
+  uint8_t buf[WRITE_BUFFER_SIZE] = {0x00};
+
+  if (!ack_request->serialize(buf + 1, LORA_BEACON_PROTOCOL::WAKE_PAYLOAD_LEN)) {
+    BEACON_LOG("[%lu] %s: wake payload serialize failed, mask=0x%X\r\n", (unsigned long)HAL_GetTick(), __func__, mask);
+    return mask;
+  }
+  hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_BUFFER_OP_CODE, buf, nullptr, static_cast<uint16_t>(WRITE_BUFFER_SIZE), &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 1);
+
+  // set irq callback for TX_DONE or TX_TIMEOUT
+  uint16_t irq_mask = SX1280_VALUES::IRQ_BIT_TX_DONE | SX1280_VALUES::IRQ_BIT_RX_TX_TIMEOUT;
+  uint8_t irq[LORA_BEACON_PROTOCOL::DIO_IRQ_PARAMS_LEN] = {};
+  ByteOrder::put_u16(irq, irq_mask);
+  ByteOrder::put_u16(irq + 2, irq_mask);
+
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, irq, nullptr, LORA_BEACON_PROTOCOL::DIO_IRQ_PARAMS_LEN, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 2);
+
+  // transmit (single-shot, auto-standby on TxDone)
+  uint8_t tx_param[3] = {SX1280_VALUES::PERIOD_BASE_1_MS};
+  ByteOrder::put_u16(tx_param + 1, BEACON_CONSTANTS::BEACON_ACK_TX_TIMEOUT_MS);
+
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_TX_OP_CODE, tx_param, nullptr, 3, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 3);
+
+  BEACON_LOG("[%lu] ack request sent\r\n", (unsigned long)HAL_GetTick());
+
+  return mask;
+}
+
+uint8_t BeaconBridge::ack_listen()
+{
+  uint16_t mask = 0;
+  SX1280Device::SX1280_Status sta{};
+  HAL_StatusTypeDef hal;
+
+  // Reuses the frequency/modulation with different ack len
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE,
+                         LORA_BEACON_PROTOCOL::WAKE_ACK_PACKET_PARAMS,
+                         nullptr,
+                         LORA_BEACON_PROTOCOL::WAKE_PACKET_PARAM_LEN,
+                         &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 0);
+
+  // route RxDone + RxTimeout interrupts to DIO1
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, LORA_BEACON_PROTOCOL::ACK_LISTEN_IRQ_MASK, nullptr, 8, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 1);
@@ -238,63 +324,19 @@ uint16_t BeaconBridge::listen_for_ack()
   // start timeout-active RX
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_RX_OP_CODE, LORA_BEACON_PROTOCOL::ACK_LISTEN_RX_PARAMS, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 2);
 
-  if (mask == LISTEN_FOR_ACK_FULL_MASK) {
-    this->mode = MODE::ACK_LISTEN;
-    BEACON_LOG("[%lu] entering ACK_LISTEN\r\n", (unsigned long)HAL_GetTick());
-  }
+  BEACON_LOG("[%lu] entering ACK_LISTEN\r\n", (unsigned long)HAL_GetTick());
 
   return mask;
 }
 
-uint16_t BeaconBridge::rearm_ack_listen()
-{
-  uint16_t mask = 0;
-  SX1280Device::SX1280_Status sta{};
-
-  const HAL_StatusTypeDef hal =
-    device.SPI_write(&SX1280_OPERATIONS::SET_RX_OP_CODE, LORA_BEACON_PROTOCOL::ACK_LISTEN_RX_PARAMS, nullptr, 3, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 0);
-
-  return mask;
-}
-
-uint16_t BeaconBridge::stop_ack_listen()
-{
-  mode = MODE::NONE;
-  uint16_t mask = 0;
-  SX1280Device::SX1280_Status sta{};
-
-  // RX doesn't necessarily stop on its own -- explicitly SetStandby before reconfiguring for ranging, since
-  // to_ranging_master() doesn't start with its own SetStandby (assumes the caller left the chip in STDBY_RC)
-  HAL_StatusTypeDef hal = device.SPI_write(&SX1280_OPERATIONS::SET_STANDBY_OP_CODE, &SX1280_VALUES::STDBY_RC_STAND_BY, nullptr, 1, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 0);
-
-  BEACON_LOG("[%lu] ACK_LISTEN stopped\r\n", (unsigned long)HAL_GetTick());
-
-  return mask;
-}
-
-bool BeaconBridge::wake_ack_matched(AckPacket* ack_out, bool rearm_listen)
+std::optional<AckPacket> BeaconBridge::get_ack_response()
 {
   SX1280Device::SX1280_Status sta{};
-  auto rearm_now = [&]() {
-    if (rearm_listen) {
-      rearm_ack_listen();
-    }
-  };
 
   constexpr uint8_t BUFF_STA_SIZE = 3;
   uint8_t tx_buff_sta[BUFF_STA_SIZE] = {};
@@ -303,221 +345,127 @@ bool BeaconBridge::wake_ack_matched(AckPacket* ack_out, bool rearm_listen)
   // read RX buffer status -> length + start
   HAL_StatusTypeDef hal = device.SPI_write(&SX1280_OPERATIONS::READ_BUFFER_STATUS_OP_CODE, tx_buff_sta, rx_buff_sta, BUFF_STA_SIZE, &sta);
   if (!step_ok(hal, sta)) {
-    rearm_now();
-    BEACON_LOG("[%lu] wake_ack_matched: buffer status read failed, hal=%d cmd_status=%d busy=%d\r\n",
-               (unsigned long)HAL_GetTick(),
-               static_cast<int>(hal),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy));
-    return false;
+    BEACON_LOG("[%lu] buffer read failed, hal=%d\r\n", (unsigned long)HAL_GetTick(), static_cast<int>(hal));
+    return std::nullopt;
   }
 
   uint8_t len = rx_buff_sta[1];
   uint8_t beg = rx_buff_sta[2];
 
-  // shorter or longer than an ack -> not ours
-  constexpr uint8_t PAYLOAD_LEN = LORA_BEACON_PROTOCOL::WAKE_ACK_PAYLOAD_LEN;
-  if (len != PAYLOAD_LEN) {
-    rearm_now();
-    BEACON_LOG("[%lu] wake_ack_matched: unexpected payload len=%u (expected %u)\r\n", (unsigned long)HAL_GetTick(), len, PAYLOAD_LEN);
-    return false;
+  // if value of buffer shorter or longer then WAKE_PAYLOAD_LEN -> return early
+  if (len != LORA_BEACON_PROTOCOL::WAKE_ACK_PAYLOAD_LEN) {
+    BEACON_LOG(
+      "[%lu] unexpected payload len=%u (expected %u)\r\n", (unsigned long)HAL_GetTick(), len, LORA_BEACON_PROTOCOL::WAKE_ACK_PAYLOAD_LEN);
+    return std::nullopt;
   }
 
-  constexpr uint8_t BUFFER_OFFSET_SIZE = 2;  // the buffer offset to start reading from + a mandatory dummy/turnaround clock cycle
-  constexpr uint8_t BUFF_READ_SIZE = BUFFER_OFFSET_SIZE + PAYLOAD_LEN;
+  constexpr uint8_t BUFFER_OFFSET_SIZE = 2;  // the buffer offset to start reading from + a mandatory dummy value
+  constexpr uint8_t BUF_READ_SIZE = BUFFER_OFFSET_SIZE + LORA_BEACON_PROTOCOL::WAKE_ACK_PAYLOAD_LEN;
 
-  uint8_t tx_buff_read[BUFF_READ_SIZE] = {beg};
-  uint8_t rx_buff_read[BUFF_READ_SIZE] = {};
-  sta = {};
+  uint8_t tx_buff_read[BUF_READ_SIZE] = {beg, 0x00};
+  uint8_t rx_buff_read[BUF_READ_SIZE] = {};
 
   // read the received payload
-  hal = device.SPI_write(&SX1280_OPERATIONS::READ_BUFFER_OP_CODE, tx_buff_read, rx_buff_read, static_cast<uint16_t>(BUFF_READ_SIZE), &sta);
+  hal = device.SPI_write(&SX1280_OPERATIONS::READ_BUFFER_OP_CODE, tx_buff_read, rx_buff_read, static_cast<uint16_t>(BUF_READ_SIZE), &sta);
   if (!step_ok(hal, sta)) {
-    rearm_now();
-    BEACON_LOG("[%lu] wake_ack_matched: payload read failed, hal=%d cmd_status=%d busy=%d\r\n",
-               (unsigned long)HAL_GetTick(),
-               static_cast<int>(hal),
-               static_cast<int>(sta.command_status),
-               static_cast<int>(sta.busy));
+    BEACON_LOG("[%lu] payload read failed, hal=%d\r\n", (unsigned long)HAL_GetTick(), static_cast<int>(hal));
+    return std::nullopt;
+  }
+
+  // check magic if no return early
+  const uint8_t* payload = rx_buff_read + BUFFER_OFFSET_SIZE;
+  if (payload[0] != LORA_BEACON_PROTOCOL::WAKE_ACK[0] || payload[1] != LORA_BEACON_PROTOCOL::WAKE_ACK[1]) {
+    BEACON_LOG("[%lu] ack magic mismatch\r\n", (unsigned long)HAL_GetTick());
+    return std::nullopt;
+  }
+
+  return AckPacket::parse(payload + sizeof(LORA_BEACON_PROTOCOL::WAKE_ACK));
+}
+
+void BeaconBridge::arm_timer(uint32_t ms)
+{
+  HAL_TIM_Base_Stop_IT(timer);
+
+  __HAL_TIM_CLEAR_FLAG(timer, TIM_FLAG_UPDATE);
+  __HAL_TIM_SET_COUNTER(timer, 0);
+  __HAL_TIM_SET_AUTORELOAD(timer, ms - 1);
+  HAL_TIM_Base_Start_IT(timer);
+}
+
+void BeaconBridge::disarm_timer()
+{
+  HAL_TIM_Base_Stop_IT(timer);
+}
+
+bool BeaconBridge::rearm_rx()
+{
+  SX1280Device::SX1280_Status sta{};
+
+  HAL_StatusTypeDef hal =
+    device.SPI_write(&SX1280_OPERATIONS::SET_RX_OP_CODE, LORA_BEACON_PROTOCOL::ACK_LISTEN_RX_PARAMS, nullptr, 3, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, 0, hal, sta);
     return false;
   }
-
-  // the payload is safely in rx_buff_read now: the RX buffer may be overwritten from here on
-  rearm_now();
-
-  const uint8_t* payload = &rx_buff_read[BUFFER_OFFSET_SIZE];
-  constexpr uint8_t MAGIC_LEN = sizeof(LORA_BEACON_PROTOCOL::WAKE_ACK);
-
-  // check the ack magic matches
-  for (uint8_t i = 0; i < MAGIC_LEN; ++i) {
-    if (payload[i] != LORA_BEACON_PROTOCOL::WAKE_ACK[i]) {
-      BEACON_LOG(
-        "[%lu] wake_ack_matched: magic mismatch at byte %u got=0x%02X want=0x%02X (buffer start=%u, first bytes %02X %02X %02X %02X)\r\n",
-        (unsigned long)HAL_GetTick(),
-        i,
-        payload[i],
-        LORA_BEACON_PROTOCOL::WAKE_ACK[i],
-        static_cast<unsigned>(beg),
-        payload[0],
-        payload[1],
-        payload[2],
-        payload[3]);
-      return false;
-    }
-  }
-
-  // raw payload hex dump (magic + anchor id + x/y/z) for testing, only reached when the magic matched
-  BEACON_LOG("[%lu] wake_ack_matched: payload =", (unsigned long)HAL_GetTick());
-  for (uint8_t i = 0; i < PAYLOAD_LEN; ++i) {
-    BEACON_LOG(" %02X", payload[i]);
-  }
-  BEACON_LOG("\r\n");
-
-  const AckPacket ack = AckPacket::parse(&payload[MAGIC_LEN]);
-  if (ack_out != nullptr) {
-    *ack_out = ack;
-  }
-
-  BEACON_LOG("[%lu] wake ack matched (anchor 0x%08lX at %d, %d, %d cm)\r\n",
-             (unsigned long)HAL_GetTick(),
-             (unsigned long)ack.anchor_id,
-             static_cast<int>(ack.x_cm),
-             static_cast<int>(ack.y_cm),
-             static_cast<int>(ack.z_cm));
 
   return true;
 }
 
-uint16_t BeaconBridge::to_ranging_master(uint32_t target_anchor_address)
+bool BeaconBridge::register_anchor(const AckPacket* ack)
 {
-  mode = MODE::NONE;
-  ranging_target_address = target_anchor_address;
-  uint16_t mask = 0;
+  for (int i = 0; i < acks.count; i++) {
+    if (acks.anchors[i].anchor_id == ack->anchor_id) {
+      return false;
+    }
+  }
+  acks.anchors[acks.count] = *ack;
+  acks.count++;
+  return true;
+}
+
+uint8_t BeaconBridge::start_ranging(uint32_t anchor_id)
+{
+  uint8_t mask = 0;
   SX1280Device::SX1280_Status sta{};
   HAL_StatusTypeDef hal;
 
-  // select ranging packet type
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_TYPE_OP_CODE, &SX1280_VALUES::PACKET_TYPE_RANGING, nullptr, 1, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 0);
-
-  // set carrier frequency
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_FREQUENCY_OP_CODE, SX1280_VALUES::RF_FREQUENCY_BYTES, nullptr, 3, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 1);
-
-  // set SF7/BW1600/CR4·5 modulation
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_MODULATION_OP_CODE, SX1280_VALUES::MODULATION_PARAMS_SF7, nullptr, 3, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 2);
-
-  // required register fixup for SF7/SF8
-  hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::SF_7_FIXUP_WRITE, nullptr, 3, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 3);
-
-  // configure packet params for the ranging exchange
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE, SX1280_VALUES::RANGING_PACKET_PARAMS, nullptr, 7, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 4);
+  ranging_target_address = anchor_id;  // only used to tag log lines
 
   // set the target anchor's ranging address
   hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE,
-                         ByteOrder::register_write_u32(SX1280_VALUES::REG_RANGING_MASTER_TARGET_ADDR, target_anchor_address).data(),
+                         ByteOrder::register_write_u32(SX1280_VALUES::REG_RANGING_MASTER_TARGET_ADDR, anchor_id).data(),
                          nullptr,
                          6,
                          &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 5);
-
-  // set ranging address check length (must match the anchor's)
-  hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::RANGING_ADDR_CHECK_LEN_8BIT, nullptr, 3, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 6);
-
-  // write RxTx-delay calibration offset
-  hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::RANGING_CALIBRATION_WRITE, nullptr, 4, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 7);
-
-  // set ranging role to master
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_RANGING_ROLE_OP_CODE, &SX1280_VALUES::RANGING_ROLE_MASTER, nullptr, 1, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 8);
-
-  // route ranging interrupts to DIO1
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, SX1280_VALUES::RANGING_MASTER_IRQ_MASK, nullptr, 8, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return mask;
-  }
-  mask |= (1u << 9);
-
-  if (mask == TO_RANGING_MASTER_FULL_MASK) {
-    this->mode = MODE::RANGING;
-    BEACON_LOG("[%lu] entering RANGING (target 0x%08lX)\r\n", (unsigned long)HAL_GetTick(), (unsigned long)target_anchor_address);
-  }
-
-  return mask;
-}
-
-uint16_t BeaconBridge::send_ranging_request()
-{
-  uint16_t mask = 0;
-  SX1280Device::SX1280_Status sta{};
-
-  // transmit the ranging request; the chip's own timeout ends the exchange if the anchor never answers
-  HAL_StatusTypeDef hal =
-    device.SPI_write(&SX1280_OPERATIONS::SET_TX_OP_CODE, LORA_BEACON_PROTOCOL::RANGING_REQUEST_TX_PARAMS, nullptr, 3, &sta);
-  if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
+    log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 0);
 
+  // transmit the ranging request (the DIO1 routing was set once in to_ranging()); the chip's own timeout ends the exchange if the anchor never answers
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_TX_OP_CODE, LORA_BEACON_PROTOCOL::RANGING_REQUEST_TX_PARAMS, nullptr, 3, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 1);
+
+  BEACON_LOG("[%lu] anchor 0x%08lX ranging request sent\r\n", (unsigned long)HAL_GetTick(), (unsigned long)anchor_id);
   return mask;
 }
 
-bool BeaconBridge::read_ranging_result_cm(int32_t* distance_out)
+uint8_t BeaconBridge::get_ranging_result(int32_t* out)
 {
-  mode = MODE::NONE;
-
-  uint16_t mask = 0;
+  uint8_t mask = 0;
   SX1280Device::SX1280_Status sta{};
   HAL_StatusTypeDef hal;
 
   // XOSC standby, required before touching the ranging result registers
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_STANDBY_OP_CODE, &SX1280_VALUES::STDBY_XOSC_STAND_BY, nullptr, 1, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return false;
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
   }
   mask |= (1u << 0);
 
@@ -527,10 +475,11 @@ bool BeaconBridge::read_ranging_result_cm(int32_t* distance_out)
                               0x00,
                               0x00};
   uint8_t read_clock_rx[4] = {};
+
   hal = device.SPI_write(&SX1280_OPERATIONS::READ_REGISTER_OP_CODE, read_clock_tx, read_clock_rx, 4, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return false;
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
   }
   mask |= (1u << 1);
   uint8_t mem_clock_reg = read_clock_rx[3];
@@ -541,16 +490,16 @@ bool BeaconBridge::read_ranging_result_cm(int32_t* distance_out)
                                static_cast<uint8_t>(mem_clock_reg | (1u << 1))};
   hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, write_clock_tx, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return false;
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
   }
   mask |= (1u << 2);
 
   // select the debiased result type
   hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::RANGING_RESULT_MUX_DEBIASED_WRITE, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return false;
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
   }
   mask |= (1u << 3);
 
@@ -564,8 +513,8 @@ bool BeaconBridge::read_ranging_result_cm(int32_t* distance_out)
   uint8_t result_rx[6] = {};
   hal = device.SPI_write(&SX1280_OPERATIONS::READ_REGISTER_OP_CODE, result_tx, result_rx, 6, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return false;
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
   }
   mask |= (1u << 4);
 
@@ -577,40 +526,30 @@ bool BeaconBridge::read_ranging_result_cm(int32_t* distance_out)
                                  mem_clock_reg};
   hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, restore_clock_tx, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return false;
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
   }
   mask |= (1u << 5);
 
   // back to RC standby
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_STANDBY_OP_CODE, &SX1280_VALUES::STDBY_RC_STAND_BY, nullptr, 1, &sta);
   if (!step_ok(hal, sta)) {
-    BEACON_LOG_STEP_FAIL(hal, sta, mask);
-    return false;
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
   }
   mask |= (1u << 6);
 
-  *distance_out = raw_result * SX1280_VALUES::RANGING_RESULT_TO_CM_MULTIPLIER;
+  *out = raw_result * SX1280_VALUES::RANGING_RESULT_TO_CM_MULTIPLIER;
 
-  BEACON_LOG("[%lu] anchor 0x%08lX ranging result: %ld cm\r\n",
+  BEACON_LOG("[%lu] anchor 0x%08lX ranging result: raw=%ld -> %ld cm (mem_clock=0x%02X, mask=0x%X)\r\n",
              (unsigned long)HAL_GetTick(),
              (unsigned long)ranging_target_address,
-             (long)*distance_out);
+             (long)raw_result,
+             (long)*out,
+             mem_clock_reg,
+             mask);
 
-  return true;
-}
-
-void BeaconBridge::log_ranging_no_result(uint16_t irq_mask)
-{
-  if (irq_mask & SX1280_VALUES::IRQ_BIT_RANGING_MASTER_TIMEOUT) {
-    BEACON_LOG("[%lu] anchor 0x%08lX ranging request timed out\r\n", (unsigned long)HAL_GetTick(), (unsigned long)ranging_target_address);
-  }
-  else {
-    BEACON_LOG("[%lu] anchor 0x%08lX ranging request: no result (irq=0x%04X)\r\n",
-               (unsigned long)HAL_GetTick(),
-               (unsigned long)ranging_target_address,
-               irq_mask);
-  }
+  return mask;
 }
 
 void BeaconBridge::clear_irq()
@@ -619,13 +558,208 @@ void BeaconBridge::clear_irq()
   clear_irq_mask(&sta);
 }
 
+void BeaconBridge::on_radio(uint16_t irq, bool timer_event, uint32_t tick)
+{
+  //can be static consexper
+  AckPacketIn ack = {{LORA_BEACON_PROTOCOL::WAKE_WORD[0], LORA_BEACON_PROTOCOL::WAKE_WORD[1]},
+                     LORA_BEACON_PROTOCOL::DEFAULT_RANGING_WINDOW_MS};
+
+  uint8_t r = send_ack_request(&ack);
+  if (r != SEND_ACK_REQUEST_FULL_MASK) {
+    BEACON_LOG("[%lu] on_radio: send_ack_request failed\r\n", (unsigned long)tick);
+    mode = Mode::RECOVER;
+    return;
+  }
+
+  mode = Mode::ACK_IN_PROGRESS;
+}
+
+void BeaconBridge::on_ack_in_progress(uint16_t irq, bool timer_event, uint32_t tick)
+{
+  if (irq & SX1280_VALUES::IRQ_BIT_RX_TX_TIMEOUT) {
+    mode = Mode::RADIO;
+    BEACON_LOG("[%lu] on_ack_in_progress: TX timeout (irq=0x%X)\r\n", (unsigned long)tick, irq);
+    return;
+  }
+  if (irq & SX1280_VALUES::IRQ_BIT_TX_DONE) {
+    arm_timer(ACK_COLLECT_TIMEOUT_MS);  // armed once per cycle, see ACK_COLLECT_TIMEOUT_MS
+    mode = Mode::ACK_REQUESTED;
+    BEACON_LOG("[%lu] on_ack_in_progress: TX Done (irq=0x%X)\r\n", (unsigned long)tick, irq);
+    return;
+  }
+  mode = Mode::RECOVER;
+}
+
+void BeaconBridge::on_ack_requested(uint16_t irq, bool timer_event, uint32_t tick)
+{
+  // no new acks for ACK_COLLECT_TIMEOUT_MS and the set is incomplete
+  if (timer_event) {
+    mode = Mode::RADIO;
+    BEACON_LOG("[%lu] on_ack_requested: collect timeout with %u/%u anchors, fallback to radio\r\n",
+               (unsigned long)tick,
+               static_cast<unsigned>(acks.count),
+               static_cast<unsigned>(LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT));
+    return;
+  }
+
+  uint8_t r = ack_listen();
+  if (r != ACK_LISTEN_FULL_MASK) {
+    mode = Mode::RECOVER;
+    BEACON_LOG("[%lu] on_ack_requested: failed execute ack_listen (irq=0x%X)\r\n", (unsigned long)tick, r);
+    return;
+  }
+  mode = Mode::ACK_LISTENING;
+  return;
+}
+
+void BeaconBridge::on_ack_listen(uint16_t irq, bool timer_event, uint32_t tick)
+{
+  if (timer_event) {
+    mode = Mode::RADIO;
+    BEACON_LOG("[%lu] on_ack_listen: collect timeout with %u/%u anchors, fallback to radio\r\n",
+               (unsigned long)tick,
+               static_cast<unsigned>(acks.count),
+               static_cast<unsigned>(LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT));
+    return;
+  }
+
+  if (irq & SX1280_VALUES::IRQ_BIT_RX_DONE) {
+    mode = Mode::ACK_RECIEVED;
+    BEACON_LOG("[%lu] on_ack_listen: ACK recieved (irq=0x%X)\r\n", (unsigned long)tick, irq);
+    return;
+  }
+
+  if (irq & SX1280_VALUES::IRQ_BIT_RX_TX_TIMEOUT) {
+    mode = Mode::ACK_REQUESTED;
+    BEACON_LOG("[%lu] on_ack_listen: ACK RX timeout (irq=0x%X)\r\n", (unsigned long)tick, irq);
+    return;
+  }
+  // maybe handle generic exception if crc or else to rollback into ACK_RECIEVED
+  mode = Mode::RECOVER;
+}
+
+void BeaconBridge::on_ack_recieved(uint16_t irq, bool timer_event, uint32_t tick)
+{
+  std::optional<AckPacket> ack = get_ack_response();
+
+  // ack dispatching failed or wake word mismatch
+  if (!ack) {
+    mode = Mode::ACK_REQUESTED;
+    BEACON_LOG("[%lu] on_ack_recieved: ACK is failed or empty or wake mismatch\r\n", (unsigned long)tick);
+    return;
+  }
+
+  //if deduped anchor registered and enought anchors -> RANGING
+  if (register_anchor(&*ack)) {
+    if (acks.count >= LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT) {
+      disarm_timer();  // leaving the collect phase
+      if (to_ranging() == TO_RANGING_FULL_MASK) {
+        cursor = 0;
+        measures.count = 0;
+
+        mode = Mode::RANGING;
+        return;
+      }
+      mode = Mode::RECOVER;
+      return;
+    }
+    arm_timer(ACK_COLLECT_TIMEOUT_MS);  // a new anchor answered: restart the inactivity window
+    BEACON_LOG("[%lu] on_ack_recieved: ACK is confirmed (%u/%u anchors)\r\n",
+               (unsigned long)tick,
+               static_cast<unsigned>(acks.count),
+               static_cast<unsigned>(LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT));
+  }
+  else {
+    BEACON_LOG("[%lu] on_ack_recieved: duplicate ack ignored (%u/%u anchors)\r\n",
+               (unsigned long)tick,
+               static_cast<unsigned>(acks.count),
+               static_cast<unsigned>(LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT));
+  }
+
+  // not enough anchors collected, or a duplicate: back to listening
+  mode = Mode::ACK_REQUESTED;
+}
+
+void BeaconBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)
+{
+  if (acks.count == 0) {
+    BEACON_LOG("[%lu] on_ranging: no collected anchors to range\r\n", (unsigned long)tick);
+    mode = Mode::RECOVER;
+    return;
+  }
+
+  //end of cycle
+  if (cursor >= acks.count) {
+    cursor = 0;
+    measures.count = 0;
+  }
+
+  const AckPacket ack = acks.anchors[cursor];
+  const uint8_t r = start_ranging(ack.anchor_id);
+  if (r != START_RANGING_FULL_MASK) {
+    BEACON_LOG("[%lu] on_ranging: request for anchor 0x%08lX failed, mask=0x%X (full=0x%X)\r\n",
+               (unsigned long)tick,
+               (unsigned long)ack.anchor_id,
+               r,
+               START_RANGING_FULL_MASK);
+    mode = Mode::RECOVER;
+    return;
+  }
+
+  mode = Mode::RANGING_REQUESTED;
+}
+
+void BeaconBridge::on_ranging_requested(uint16_t irq, bool timer_event, uint32_t tick)
+{
+  const AckPacket ack = acks.anchors[cursor];
+
+  if (irq & SX1280_VALUES::IRQ_BIT_RANGING_MASTER_RESULT_VALID) {
+    int32_t result = 0;
+    const uint8_t r = get_ranging_result(&result);
+    if (r != GET_RANGING_RESULT_FULL_MASK) {
+      BEACON_LOG("[%lu] on_ranging_requested: result read for anchor 0x%08lX failed, mask=0x%X (full=0x%X)\r\n",
+                 (unsigned long)tick,
+                 (unsigned long)ack.anchor_id,
+                 r,
+                 GET_RANGING_RESULT_FULL_MASK);
+      mode = Mode::RECOVER;
+      return;
+    }
+
+    measures.measured[cursor] = {ack, result, RangeStatus::OK};
+    measures.count = static_cast<uint8_t>(cursor + 1);
+    BEACON_LOG("[%lu] on_ranging_requested: anchor 0x%08lX -> %ld cm\r\n", (unsigned long)tick, (unsigned long)ack.anchor_id, (long)result);
+
+    cursor++;
+    mode = Mode::RANGING;
+    on_ranging(0, false, tick);  // next anchor right away, no wait for another step()
+    return;
+  }
+
+  if (irq & SX1280_VALUES::IRQ_BIT_RANGING_MASTER_TIMEOUT) {
+    measures.measured[cursor] = {ack, -1, RangeStatus::TIMEOUT};
+    measures.count = static_cast<uint8_t>(cursor + 1);
+    BEACON_LOG("[%lu] on_ranging_requested: anchor 0x%08lX timed out\r\n", (unsigned long)tick, (unsigned long)ack.anchor_id);
+
+    cursor++;
+    mode = Mode::RANGING;
+    on_ranging(0, false, tick);
+    return;
+  }
+
+  BEACON_LOG("[%lu] on_ranging_requested: unexpected irq=0x%X, still waiting for anchor 0x%08lX\r\n",
+             (unsigned long)tick,
+             irq,
+             (unsigned long)ack.anchor_id);
+}
+
 void BeaconBridge::finish_cycle()
 {
-  // anchors past ranged_count were never ranged: an earlier anchor's configuration failed and ended the pass
-  for (uint8_t i = ranged_count; i < collected_count; i++) {
-    measured[i] = RangeEntry{collected_anchors[i], -1, RangeStatus::FAILED};
+  // anchors past measures.count were never ranged: an earlier anchor's configuration failed and ended the pass
+  for (uint8_t i = measures.count; i < acks.count; i++) {
+    measures.measured[i] = RangeEntry{acks.anchors[i], -1, RangeStatus::FAILED};
   }
-  frame_length = CycleFrame::Serialize(++cycle_counter, HAL_GetTick(), measured, collected_count, frame, sizeof(frame));
+  frame_length = CycleFrame::Serialize(++cycle_counter, HAL_GetTick(), measures.measured, acks.count, frame, sizeof(frame));
 }
 
 size_t BeaconBridge::take_frame(uint8_t* out, size_t capacity)
@@ -645,139 +779,59 @@ void BeaconBridge::return_to_idle()
 {
   finish_cycle();  // every path that ends a cycle comes through here
   to_radio();
-  state = BeaconState::IDLE;
+  mode = Mode::RADIO;
 }
 
-bool BeaconBridge::start_ranging(uint32_t anchor_address, volatile uint8_t& dio1_flag)
+void BeaconBridge::step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag)
 {
-  to_ranging_master(anchor_address);
+  uint16_t irq = 0;
+  const bool dio1_event = dio1_flag;
+  if (dio1_event) {
+    dio1_flag = 0;
 
-  if (mode != MODE::RANGING) {
-    return false;
-  }
-  dio1_flag = 0;
-  clear_irq();
+    get_irq_mask(&irq);
 
-  send_ranging_request();
-  ranging_request_sent_tick = HAL_GetTick();
-  return true;
-}
-
-void BeaconBridge::step(volatile uint8_t& dio1_flag)
-{
-  // IDLE: broadcast the wake request, then listen for acks
-  if (state == BeaconState::IDLE && (HAL_GetTick() - wake_broadcast_last_tick >= WAKE_BROADCAST_INTERVAL_MS)) {
-    wake_broadcast_last_tick = HAL_GetTick();
-    send_wake_broadcast();
-
-    dio1_flag = 0;  // the TX_DONE edge of the broadcast isn't an ack
-    clear_irq();
-
-    listen_for_ack();
-
-    collected_count = 0;
-    ranged_count = 0;
-    collect_phase_deadline_tick = HAL_GetTick() + LORA_BEACON_PROTOCOL::COLLECT_PHASE_CEILING_MS;
-    state = BeaconState::COLLECTING;
+    SX1280Device::SX1280_Status sta{};
+    clear_irq_mask(&sta);
   }
 
-  // COLLECTING: gather one ack per anchor until enough have answered or the collect phase runs out
-  if (state == BeaconState::COLLECTING) {
-    // The ack-listen IRQ mask routes two things to DIO1: RX_DONE (an ack arrived) and RX_TX_TIMEOUT (the chip-side listen
-    // window ran out with nothing more received). Read the IRQ status to tell them apart before touching the buffer -- after a
-    // timeout there is no packet in it, only whatever was there before (e.g. our own wake payload).
-    bool rx_timed_out = false;
-    if (dio1_flag) {
-      dio1_flag = 0;
-
-      uint16_t rx_irq = 0;
-      if (get_irq_mask(&rx_irq) != HAL_OK) {
-        rx_irq = SX1280_VALUES::IRQ_BIT_RX_DONE;  // status unreadable: fall back to trying to parse a packet
-      }
-      clear_irq();  // every catch, not just once
-
-      if (rx_irq & SX1280_VALUES::IRQ_BIT_RX_DONE) {
-        AckPacket learned_anchor{};
-        // Re-armed inside, right after the buffer read (see wake_ack_matched): the timeout-active RX returns to STDBY_RC after every
-        // received packet (datasheet, SetRx). If this ack completes the set, stop_ack_listen() below cancels the re-armed RX.
-        const bool more_expected = collected_count < LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT;
-        if (wake_ack_matched(&learned_anchor, more_expected) && more_expected) {
-          bool already_have = false;
-          for (uint8_t i = 0; i < collected_count; i++) {
-            if (collected_anchors[i].anchor_id == learned_anchor.anchor_id) {
-              already_have = true;
-              break;
-            }
-          }
-          if (!already_have) {
-            collected_anchors[collected_count] = learned_anchor;
-            collected_count++;
-            BEACON_LOG("[%lu] collected anchor 0x%08lX (%u/%u)\r\n",
-                       (unsigned long)HAL_GetTick(),
-                       (unsigned long)learned_anchor.anchor_id,
-                       static_cast<unsigned>(collected_count),
-                       static_cast<unsigned>(LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT));
-          }
-          else {
-            BEACON_LOG("[%lu] ack from anchor 0x%08lX ignored, already collected -- do two anchors share an address?\r\n",
-                       (unsigned long)HAL_GetTick(),
-                       (unsigned long)learned_anchor.anchor_id);
-          }
-        }
-      }
-      if (rx_irq & SX1280_VALUES::IRQ_BIT_RX_TX_TIMEOUT) {
-        rx_timed_out = true;  // nobody else is going to answer: no reason to wait for the collect-phase ceiling
-      }
-    }
-
-    // if anchor count is enough, or the listen window ran out, switch to ranging protocol
-    if (collected_count >= LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT || rx_timed_out || HAL_GetTick() >= collect_phase_deadline_tick) {
-      stop_ack_listen();
-      BEACON_LOG(
-        "[%lu] collect phase done, %u anchor(s) collected\r\n", (unsigned long)HAL_GetTick(), static_cast<unsigned>(collected_count));
-
-      ranging_index = 0;
-      if (collected_count > 0 && start_ranging(collected_anchors[ranging_index].anchor_id, dio1_flag)) {
-        state = BeaconState::RANGING;
-      }
-      else {
-        return_to_idle();
-      }
-    }
+  const bool timer_event = tim_flag;
+  if (timer_event) {
+    tim_flag = 0;
   }
 
-  // RANGING: one anchor at a time; each exchange ends on DIO1 callback or timeout
-  if (state == BeaconState::RANGING) {
-    const bool ceiling_elapsed = (HAL_GetTick() - ranging_request_sent_tick) >= RANGING_RESULT_CEILING_MS;
-    if (dio1_flag || ceiling_elapsed) {
-      dio1_flag = 0;
+  const uint32_t now = HAL_GetTick();
 
-      uint16_t ranging_irq = 0;
-      get_irq_mask(&ranging_irq);
-      clear_irq();
-
-      RangeEntry& entry = measured[ranging_index];
-      entry = RangeEntry{collected_anchors[ranging_index], -1, RangeStatus::FAILED};
-      if (ranging_irq & SX1280_VALUES::IRQ_BIT_RANGING_MASTER_RESULT_VALID) {
-        int32_t distance_cm = 0;
-        if (read_ranging_result_cm(&distance_cm)) {  // logs the result or the failing step itself
-          entry.distance_cm = distance_cm;
-          entry.status = RangeStatus::OK;
-        }
+  switch (mode) {
+    case Mode::RADIO:
+      on_radio(irq, timer_event, now);
+      break;
+    case Mode::ACK_IN_PROGRESS:
+      if (dio1_event) {
+        on_ack_in_progress(irq, timer_event, now);
       }
-      else {
-        if (ranging_irq & SX1280_VALUES::IRQ_BIT_RANGING_MASTER_TIMEOUT) {
-          entry.status = RangeStatus::TIMEOUT;
-        }
-        log_ranging_no_result(ranging_irq);
+      break;
+    case Mode::ACK_REQUESTED:
+      on_ack_requested(irq, timer_event, now);
+      break;
+    case Mode::ACK_LISTENING:
+      if (dio1_event || timer_event) {
+        on_ack_listen(irq, timer_event, now);
       }
-      ranged_count = ranging_index + 1;
-
-      // next collected anchor, or back to idle after the last one (or if its configuration failed)
-      ranging_index++;
-      if (ranging_index >= collected_count || !start_ranging(collected_anchors[ranging_index].anchor_id, dio1_flag)) {
-        return_to_idle();
+      break;
+    case Mode::ACK_RECIEVED:
+      on_ack_recieved(irq, timer_event, now);
+      break;
+    case Mode::RANGING:
+      on_ranging(irq, timer_event, now);
+      break;
+    case Mode::RANGING_REQUESTED:
+      if (dio1_event) {
+        on_ranging_requested(irq, timer_event, now);
       }
-    }
+      break;
+    case Mode::RECOVER:
+      // no recovery handler yet: the beacon stays here until one is written
+      break;
   }
 }
