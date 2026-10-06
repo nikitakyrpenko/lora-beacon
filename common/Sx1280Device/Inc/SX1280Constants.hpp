@@ -100,12 +100,21 @@ static constexpr uint8_t PERIOD_BASE_4_MS = 0x03;
 // Anchor idle-state duty cycle only (rover never calls SetRxDutyCycle). Original first-pass values (10ms RX /
 // 490ms sleep, ~2% duty) were validated on hardware and found too sparse against the beacon's short (~1ms)
 // wake-word preamble -- average ~45 beacon broadcasts (~227s) to catch one, confirmed empirically against the
-// theoretical duty-cycle-percentage model. Temporarily tightened to 10ms RX / 90ms sleep (100ms cycle, ~10% duty,
-// ~10 broadcasts / ~50s average wake latency) to unblock anchor+beacon bring-up. NOT a final tuned value --
-// revisit once wake latency / power draw can be measured together and weighed against extending the beacon's
-// preamble instead -- see PLAN.md Open Items.
-static constexpr uint16_t ANCHOR_IDLE_RX_PERIOD_BASE_COUNT = 10;
-static constexpr uint16_t ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT = 90;
+// theoretical duty-cycle-percentage model. Sized 2026-09-27 against the reworked beacon's session-based design
+// (vehicle-powered, tight discovery retry with no backoff while searching, ~150-225ms effective repeat interval):
+// 20ms RX / 10000ms sleep (~0.2% duty) -> expected ~75-112s average reacquisition, accepted as a rare cost (only
+// hit on cold start or after LISTENING's own LISTENING_GRACE_MS grace window already lapsed without contact) in
+// exchange for ~35,000:1 RX-vs-sleep current draw. Still needs real hardware confirmation, same as the original
+// bring-up values were -- see PLAN.md Open Items.
+static constexpr uint16_t ANCHOR_IDLE_RX_PERIOD_BASE_COUNT = 1000;
+static constexpr uint16_t ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT = 5000;
+// SetRxDutyCycle's 5-byte param blob [periodBase, rxCount MSB, rxCount LSB, sleepCount MSB, sleepCount LSB] --
+// shares PERIOD_BASE_1_MS with RX_CONTINUOUS_PARAMS below, just a different final SetRx* op/params pair.
+static constexpr uint8_t ANCHOR_IDLE_RX_DUTY_CYCLE_PARAMS[5] = {PERIOD_BASE_1_MS,
+                                                                static_cast<uint8_t>(ANCHOR_IDLE_RX_PERIOD_BASE_COUNT >> 8),
+                                                                static_cast<uint8_t>(ANCHOR_IDLE_RX_PERIOD_BASE_COUNT & 0xFF),
+                                                                static_cast<uint8_t>(ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT >> 8),
+                                                                static_cast<uint8_t>(ANCHOR_IDLE_SLEEP_PERIOD_BASE_COUNT & 0xFF)};
 
 // IRQ bit positions (Table 11-71/13-6x), combined into SetDioIrqParams'/GetIrqStatus'/ClearIrqStatus' 16-bit masks
 static constexpr uint16_t IRQ_BIT_TX_DONE = static_cast<uint16_t>(1u << 0);
@@ -186,7 +195,10 @@ static constexpr uint8_t RANGING_CALIBRATION_WRITE[4] = {static_cast<uint8_t>(RE
 
 // SetDioIrqParams payload for the ranging SLAVE role (routes RangingSlaveResponseDone + RangingMasterRequestValid
 // to DIO1) -- distinct from the master's own IRQ mask, so this one isn't shared across roles.
-static constexpr uint16_t RANGING_SLAVE_IRQ_BITS = IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE | IRQ_BIT_RANGING_MASTER_REQUEST_VALID;
+// The slave's RX is single-shot, so every event that ends it must reach DIO1 or nothing re-arms RX and the anchor goes deaf
+// without any log line: a sent response, a discarded request, and a request whose header could not be decoded.
+static constexpr uint16_t RANGING_SLAVE_IRQ_BITS =
+  IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE | IRQ_BIT_RANGING_MASTER_REQUEST_VALID | IRQ_BIT_RANGING_SLAVE_REQUEST_DISCARD | IRQ_BIT_HEADER_ERROR;
 static constexpr uint8_t RANGING_SLAVE_IRQ_MASK[8] = {static_cast<uint8_t>(RANGING_SLAVE_IRQ_BITS >> 8),
                                                       static_cast<uint8_t>(RANGING_SLAVE_IRQ_BITS),
                                                       static_cast<uint8_t>(RANGING_SLAVE_IRQ_BITS >> 8),
@@ -213,8 +225,10 @@ static constexpr uint8_t RANGING_RESULT_MUX_DEBIASED_WRITE[3] = {static_cast<uin
                                                                  static_cast<uint8_t>(REG_RANGING_RESULT_MUX & 0xFF),
                                                                  static_cast<uint8_t>(RANGING_RESULT_DEBIASED << 4)};
 
-// SetLongPreamble param (opcode SET_LONG_PREAMBLE_OP_CODE, 0x9B)
-static constexpr uint8_t LONG_PREAMBLE_ENABLE = 0x01;
+// SetLongPreamble param (opcode SET_LONG_PREAMBLE_OP_CODE, 0x9B), kept explicitly disabled: enabling it makes
+// RxDutyCycle extend its Rx window by SleepPeriod + 2*RxPeriod on ANY detected preamble, including a false one
+// from noise -- not worth it since every packet here fits inside one Rx window (no split-packet reception needed).
+static constexpr uint8_t LONG_PREAMBLE_DISABLE = 0x00;
 
 }  // namespace SX1280_VALUES
 
@@ -266,13 +280,23 @@ static constexpr uint32_t ANCHOR_ACK_SLOT_WIDTH_MS = 20;
 // Packet params for a wake-payload-sized LoRa packet (LORA_PREAMBLE_12_SYMBOLS, explicit header, WAKE_PAYLOAD_LEN
 // payload, CRC enabled, standard IQ) -- reused verbatim as a SetPacketParams `tx` payload by the anchor's
 // radio-mode (RX) setup and the beacon's radio-mode (wake-broadcast TX) setup.
-static constexpr uint8_t WAKE_PACKET_PARAMS[7] = {SX1280_VALUES::LORA_PREAMBLE_12_SYMBOLS,
-                                                  SX1280_VALUES::EXPLICIT_HEADER,
-                                                  WAKE_PAYLOAD_LEN,
-                                                  SX1280_VALUES::LORA_CRC_ENABLE,
-                                                  SX1280_VALUES::LORA_IQ_STD,
-                                                  0x00,
-                                                  0x00};
+static constexpr uint16_t WAKE_PACKET_PARAM_LEN = 7;
+static constexpr uint8_t WAKE_PACKET_PARAM_PAY[WAKE_PACKET_PARAM_LEN] = {SX1280_VALUES::LORA_PREAMBLE_12_SYMBOLS,
+                                                                         SX1280_VALUES::EXPLICIT_HEADER,
+                                                                         WAKE_PAYLOAD_LEN,
+                                                                         SX1280_VALUES::LORA_CRC_ENABLE,
+                                                                         SX1280_VALUES::LORA_IQ_STD,
+                                                                         0x00,
+                                                                         0x00};
+// Packet params for a wake-ACK-sized LoRa packet (WAKE_ACK_PAYLOAD_LEN payload, otherwise same shape as
+// WAKE_PACKET_PARAMS) -- reused verbatim by the anchor's ack-send and the beacon's ack-listen setup.
+static constexpr uint8_t WAKE_ACK_PACKET_PARAMS[WAKE_PACKET_PARAM_LEN] = {SX1280_VALUES::LORA_PREAMBLE_12_SYMBOLS,
+                                                                          SX1280_VALUES::EXPLICIT_HEADER,
+                                                                          WAKE_ACK_PAYLOAD_LEN,
+                                                                          SX1280_VALUES::LORA_CRC_ENABLE,
+                                                                          SX1280_VALUES::LORA_IQ_STD,
+                                                                          0x00,
+                                                                          0x00};
 
 // SetDioIrqParams payload routing RX_DONE, HEADER_ERROR and CRC_ERROR to DIO1 (irqMask + dio1Mask both set, dio2Mask/dio3Mask
 // left 0) -- used by the anchor's radio-mode idle-listen setup. The two error bits let the anchor tell a corrupted packet from a
@@ -292,20 +316,16 @@ static constexpr uint8_t IDLE_RX_IRQ_MASK[8] = {static_cast<uint8_t>(IDLE_RX_IRQ
 // anchor's radio-mode idle-listen setup.
 static constexpr uint8_t RX_CONTINUOUS_PARAMS[3] = {SX1280_VALUES::PERIOD_BASE_1_MS, 0x00, 0x00};
 
-// Packet params for a wake-ACK-sized LoRa packet (WAKE_ACK_PAYLOAD_LEN payload, otherwise same shape as
-// WAKE_PACKET_PARAMS) -- reused verbatim by the anchor's ack-send and the beacon's ack-listen setup.
-static constexpr uint8_t WAKE_ACK_PACKET_PARAMS[7] = {SX1280_VALUES::LORA_PREAMBLE_12_SYMBOLS,
-                                                      SX1280_VALUES::EXPLICIT_HEADER,
-                                                      WAKE_ACK_PAYLOAD_LEN,
-                                                      SX1280_VALUES::LORA_CRC_ENABLE,
-                                                      SX1280_VALUES::LORA_IQ_STD,
-                                                      0x00,
-                                                      0x00};
+// SetRx payload for the ranging SLAVE: periodBaseCount 0xFFFF is the real continuous mode -- the chip stays in RX after every received frame
+// (a request for another anchor, another anchor's ack, a header error, ...) instead of dropping to STDBY_RC. The datasheet advises it for the
+// slave (13.5.1 step 11). Note RX_CONTINUOUS_PARAMS above has count 0x0000, which is the single-shot mode, despite its name.
+static constexpr uint8_t RANGING_SLAVE_RX_PARAMS[3] = {SX1280_VALUES::PERIOD_BASE_1_MS, 0xFF, 0xFF};
 
 // SetDioIrqParams payload routing only TX_DONE to DIO1 (irqMask + dio1Mask both set, dio2Mask/dio3Mask left 0) --
 // used by the anchor's ack-send so send_ranging_slave_ack() can confirm the ack actually left the antenna
 // instead of trusting SetTx's SPI cmd_status alone (whatever IrqMask was active before -- e.g. RX_DONE_IRQ_MASK
 // from radio-mode idle-listen -- would otherwise never latch TX_DONE into the IrqStatus register at all).
+static constexpr uint8_t DIO_IRQ_PARAMS_LEN = 8;
 static constexpr uint8_t TX_DONE_IRQ_MASK[8] = {static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_TX_DONE >> 8),
                                                 static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_TX_DONE),
                                                 static_cast<uint8_t>(SX1280_VALUES::IRQ_BIT_TX_DONE >> 8),
@@ -324,7 +344,7 @@ static constexpr uint8_t TX_SINGLE_SHOT_PARAMS[3] = {SX1280_VALUES::PERIOD_BASE_
 // after EVERY received packet as well as at end-of-count, so it does not keep listening for further anchors' ACKs by
 // itself: BeaconBridge re-arms it with SetRx (rearm_ack_listen()) after each ack. This chip-side window sits inside
 // COLLECT_PHASE_CEILING_MS as a fallback, not the primary bound.
-static constexpr uint16_t ACK_LISTEN_TIMEOUT_MS = 100;
+static constexpr uint16_t ACK_LISTEN_TIMEOUT_MS = 30;
 static constexpr uint8_t ACK_LISTEN_RX_PARAMS[3] = {
   SX1280_VALUES::PERIOD_BASE_1_MS, static_cast<uint8_t>(ACK_LISTEN_TIMEOUT_MS >> 8), static_cast<uint8_t>(ACK_LISTEN_TIMEOUT_MS & 0xFF)};
 
@@ -344,6 +364,15 @@ static constexpr uint16_t RANGING_REQUEST_TIMEOUT_MS = 1000;
 static constexpr uint8_t RANGING_REQUEST_TX_PARAMS[3] = {SX1280_VALUES::PERIOD_BASE_1_MS,
                                                          static_cast<uint8_t>(RANGING_REQUEST_TIMEOUT_MS >> 8),
                                                          static_cast<uint8_t>(RANGING_REQUEST_TIMEOUT_MS & 0xFF)};
+
 }  // namespace LORA_BEACON_PROTOCOL
+
+namespace BEACON_CONSTANTS {
+//describes total size of wake request and wake ack
+static constexpr uint8_t WAKE_REQUEST_PACKET_SIZE = 3;
+static constexpr uint8_t WAKE_ACK_PACKET_SIZE = 12;
+
+static constexpr uint16_t BEACON_ACK_TX_TIMEOUT_MS = 50;
+}  // namespace BEACON_CONSTANTS
 
 #endif

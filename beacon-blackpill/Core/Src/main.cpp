@@ -27,6 +27,7 @@
 #include "SX1280BringUp.hpp"
 #include "cmsis_gcc.h"
 #include "stm32h5xx_hal_gpio.h"
+#include "stm32h5xx_hal_tim.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -57,11 +58,14 @@
 
 SPI_HandleTypeDef hspi3;
 
+TIM_HandleTypeDef htim6;
+
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
 
 volatile uint8_t DIO1_Callback_detected = 0;
+volatile uint8_t TIM6_Callback_detected = 0;
 
 /* USER CODE END PV */
 
@@ -71,6 +75,7 @@ static void MX_GPIO_Init(void);
 static void MX_ICACHE_Init(void);
 static void MX_SPI3_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -165,6 +170,7 @@ int main(void)
   MX_ICACHE_Init();
   MX_SPI3_Init();
   MX_USART1_UART_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
 
 #if BRINGUP_MODE != 0
@@ -203,7 +209,7 @@ int main(void)
   }
 
   static BeaconBridge beacon_bridge(
-    &hspi3, BUSY_GPIO_Port, NSS_GPIO_Port, NRESET_GPIO_Port, TCXOEN_GPIO_Port, BUSY_Pin, NSS_Pin, NRESET_Pin, TCXOEN_Pin);
+    &hspi3, &htim6, BUSY_GPIO_Port, NSS_GPIO_Port, NRESET_GPIO_Port, TCXOEN_GPIO_Port, BUSY_Pin, NSS_Pin, NRESET_Pin, TCXOEN_Pin);
 
   if (SX1280BringUp::CheckResetBusyLow(bringup_pins)) {
     bringup_mask |= SX1280BringUp::BIT_RESET;
@@ -228,12 +234,12 @@ int main(void)
   }
 #else
   static BeaconBridge beacon_bridge(
-    &hspi3, BUSY_GPIO_Port, NSS_GPIO_Port, NRESET_GPIO_Port, TCXOEN_GPIO_Port, BUSY_Pin, NSS_Pin, NRESET_Pin, TCXOEN_Pin);
+    &hspi3, &htim6, BUSY_GPIO_Port, NSS_GPIO_Port, NRESET_GPIO_Port, TCXOEN_GPIO_Port, BUSY_Pin, NSS_Pin, NRESET_Pin, TCXOEN_Pin);
 
   beacon_bridge.to_radio();
 
   //debug led for traking mode
-  if (beacon_bridge.get_mode() == MODE::RADIO) {
+  if (beacon_bridge.get_mode() == Mode::RADIO) {
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
   }
 
@@ -246,7 +252,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    beacon_bridge.step(DIO1_Callback_detected);
+    beacon_bridge.step(DIO1_Callback_detected, TIM6_Callback_detected);
 
     // a whole wake -> collect -> range pass finished: flush its frame (layout in CycleFrame.hpp). This is the beacon's actual
     // output, not logging, so it is on in every build regardless of DEBUG_BEACON. Blocking is fine here: the pass is over
@@ -434,6 +440,33 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
+  * @brief TIM6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM6_Init(void)
+{
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 31999;  // 32MHz APB1 timer clock -> 1kHz counter (1 count = 1ms)
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 65535;  // placeholder -- overwritten per-arm at runtime
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK) {
+    Error_Handler();
+  }
+  if (HAL_TIM_OnePulse_Init(&htim6, TIM_OPMODE_SINGLE) != HAL_OK) {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK) {
+    Error_Handler();
+  }
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -517,6 +550,13 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == DIO1_Pin) {
     DIO1_Callback_detected = 1;
+  }
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
+{
+  if (htim->Instance == TIM6) {
+    TIM6_Callback_detected = 1;
   }
 }
 
