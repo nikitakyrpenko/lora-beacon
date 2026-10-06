@@ -197,8 +197,8 @@ static constexpr uint8_t RANGING_CALIBRATION_WRITE[4] = {static_cast<uint8_t>(RE
 // to DIO1) -- distinct from the master's own IRQ mask, so this one isn't shared across roles.
 // The slave's RX is single-shot, so every event that ends it must reach DIO1 or nothing re-arms RX and the anchor goes deaf
 // without any log line: a sent response, a discarded request, and a request whose header could not be decoded.
-static constexpr uint16_t RANGING_SLAVE_IRQ_BITS = IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE | IRQ_BIT_RANGING_MASTER_REQUEST_VALID |
-                                                   IRQ_BIT_RANGING_SLAVE_REQUEST_DISCARD | IRQ_BIT_HEADER_ERROR;
+static constexpr uint16_t RANGING_SLAVE_IRQ_BITS =
+  IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE | IRQ_BIT_RANGING_MASTER_REQUEST_VALID | IRQ_BIT_RANGING_SLAVE_REQUEST_DISCARD | IRQ_BIT_HEADER_ERROR;
 static constexpr uint8_t RANGING_SLAVE_IRQ_MASK[8] = {static_cast<uint8_t>(RANGING_SLAVE_IRQ_BITS >> 8),
                                                       static_cast<uint8_t>(RANGING_SLAVE_IRQ_BITS),
                                                       static_cast<uint8_t>(RANGING_SLAVE_IRQ_BITS >> 8),
@@ -259,7 +259,7 @@ static constexpr uint8_t WAKE_ACK_PAYLOAD_LEN = static_cast<uint8_t>(sizeof(WAKE
 static constexpr uint32_t COLLECT_PHASE_CEILING_MS = 150;
 // Matches physical anchor count for this bring-up phase -- hardcoded the same way target addresses were
 // originally hardcoded, not a general discovery mechanism (see PROTOCOL.md).
-static constexpr uint8_t EXPECTED_ANCHOR_COUNT = 1;
+static constexpr uint8_t EXPECTED_ANCHOR_COUNT = 2;
 // Default/fallback value -- also what the beacon currently sends in the wake payload's duration field (nothing
 // tunes it per-cycle yet, but it no longer has to match a compile-time constant baked into the anchor separately).
 static constexpr uint32_t DEFAULT_RANGING_WINDOW_MS = 2000;
@@ -315,6 +315,11 @@ static constexpr uint8_t IDLE_RX_IRQ_MASK[8] = {static_cast<uint8_t>(IDLE_RX_IRQ
 // SetRx payload meaning "listen indefinitely" (periodBase=1ms, count=0x0000 -> no timeout) -- used by the
 // anchor's radio-mode idle-listen setup.
 static constexpr uint8_t RX_CONTINUOUS_PARAMS[3] = {SX1280_VALUES::PERIOD_BASE_1_MS, 0x00, 0x00};
+
+// SetRx payload for the ranging SLAVE: periodBaseCount 0xFFFF is the real continuous mode -- the chip stays in RX after every received frame
+// (a request for another anchor, another anchor's ack, a header error, ...) instead of dropping to STDBY_RC. The datasheet advises it for the
+// slave (13.5.1 step 11). Note RX_CONTINUOUS_PARAMS above has count 0x0000, which is the single-shot mode, despite its name.
+static constexpr uint8_t RANGING_SLAVE_RX_PARAMS[3] = {SX1280_VALUES::PERIOD_BASE_1_MS, 0xFF, 0xFF};
 
 // SetDioIrqParams payload routing only TX_DONE to DIO1 (irqMask + dio1Mask both set, dio2Mask/dio3Mask left 0) --
 // used by the anchor's ack-send so send_ranging_slave_ack() can confirm the ack actually left the antenna

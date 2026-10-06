@@ -280,8 +280,8 @@ uint16_t AnchorBridge::to_ranging()
   }
   mask |= (1u << 9);
 
-  // start listening indefinitely
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_RX_OP_CODE, LORA_BEACON_PROTOCOL::RX_CONTINUOUS_PARAMS, nullptr, 3, &sta);
+  // continuous RX for the ranging slave
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_RX_OP_CODE, LORA_BEACON_PROTOCOL::RANGING_SLAVE_RX_PARAMS, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
     log_step_failure(__func__, mask, hal, sta);
     return mask;
@@ -583,24 +583,14 @@ void AnchorBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)
   // the slave ranging response has left the antenna or was discarded
   if (irq & SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_RESPONSE_DONE || irq & SX1280_VALUES::IRQ_BIT_RANGING_SLAVE_REQUEST_DISCARD) {
     disarm_timer();
-    arm_timer(latch.ranging);
-    if (!rearm_rx()) {
-      try_recover(tick);
-      return;
-    }
+    arm_timer(latch.ranging);  // RX is continuous, so the chip is still listening
     mode = Mode::RANGING;
     ANCHOR_LOG("[%lu] refresh RANGING window\r\n", (unsigned long)tick);
     return;
   }
 
-  // a request whose header could not be decoded (noise, collision) ended the single-shot RX: listen again. The ranging window is
-  // deliberately not refreshed, so noise alone can't keep the anchor armed after the beacon has gone.
   if (irq & SX1280_VALUES::IRQ_BIT_HEADER_ERROR) {
-    if (!rearm_rx()) {
-      try_recover(tick);
-      return;
-    }
-    ANCHOR_LOG("[%lu] on_ranging: header error, RX re-armed (irq=0x%X)\r\n", (unsigned long)tick, irq);
+    ANCHOR_LOG("[%lu] on_ranging: header error, still listening (irq=0x%X)\r\n", (unsigned long)tick, irq);
     return;
   }
 

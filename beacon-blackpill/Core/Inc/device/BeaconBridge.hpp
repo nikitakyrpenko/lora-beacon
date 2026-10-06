@@ -10,7 +10,7 @@
 #include "SX1280Device.hpp"
 #include "stm32h5xx_hal_tim.h"
 
-enum class Mode { RADIO, ACK_IN_PROGRESS, ACK_REQUESTED, ACK_LISTENING, ACK_RECIEVED, RANGING, RANGING_REQUESTED, RECOVER };
+enum class Mode { RADIO, ACK_IN_PROGRESS, ACK_REQUESTED, ACK_LISTENING, ACK_RECIEVED, RANGING, RANGING_REQUESTED, RANGING_WAIT, RECOVER };
 
 class BeaconBridge {
   struct AckBag {
@@ -39,6 +39,7 @@ class BeaconBridge {
   Recover recover = {};
 
   uint8_t cursor = 0;  // global index currently being ranged
+  uint8_t misses = 0;  // consecutive ranging timeouts, reset by any result and on entering RANGING
 
   // outcome of the cycle in progress, and the frame of the last finished one (see take_frame())
   uint32_t cycle_counter;
@@ -51,6 +52,12 @@ public:
   // timeouts (one listen window) don't touch it, so it only expires when no new ack arrived for this long.
   static constexpr uint32_t ACK_COLLECT_TIMEOUT_MS = 250;
   // RECOVER: delay between two attempts, and how many plain to_radio() retries come before an NRESET of the chip
+  // Consecutive ranging timeouts after which the beacon gives up and goes back to RADIO to send a new wake. Without it a deaf anchor
+  // keeps receiving ranging requests it cannot decode (header errors) and no wake ever reaches it.
+  static constexpr uint8_t RANGING_MAX_CONSECUTIVE_MISSES = 20;
+  // Idle gap between two passes over all collected anchors (RANGING_WAIT, ended by TIM6). The rate is 1 / (gap + pass duration), so with
+  // one anchor (about 6 ms per pass) 100 ms is about 9.4 Hz and 200 ms about 4.9 Hz; it drops slightly as anchors are added.
+  static constexpr uint32_t RANGING_PASS_GAP_MS = 200;
   static constexpr uint32_t RECOVERY_DELAY_MS = 1000;
   static constexpr uint8_t RADIO_RECOVER_MAX_RETRIES = 1;
   // Fallback ceiling for one ranging exchange (a bit more than the RANGING_REQUEST_TIMEOUT_MS the request's SetTx
@@ -119,5 +126,6 @@ public:
   void on_ack_recieved(uint16_t irq, bool timer_event, uint32_t tick);
   void on_ranging(uint16_t irq, bool timer_event, uint32_t tick);
   void on_ranging_requested(uint16_t irq, bool timer_event, uint32_t tick);
+  void on_ranging_wait(uint16_t irq, bool timer_event, uint32_t tick);
   void on_recover(uint16_t irq, bool timer_event, uint32_t tick);
 };

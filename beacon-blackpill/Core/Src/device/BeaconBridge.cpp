@@ -25,7 +25,7 @@ static constexpr uint16_t TO_RANGING_FULL_MASK = (1u << 9) - 1;
 static constexpr uint16_t SEND_ACK_REQUEST_FULL_MASK = (1u << 4) - 1;
 static constexpr uint16_t ACK_LISTEN_FULL_MASK = (1u << 3) - 1;
 static constexpr uint16_t START_RANGING_FULL_MASK = (1u << 2) - 1;
-static constexpr uint16_t GET_RANGING_RESULT_FULL_MASK = (1u << 7) - 1;
+static constexpr uint16_t GET_RANGING_RESULT_FULL_MASK = (1u << 8) - 1;
 
 namespace {
 
@@ -496,12 +496,28 @@ uint8_t BeaconBridge::get_ranging_result(int32_t* out)
   mask |= (1u << 2);
 
   // select the debiased result type
-  hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, SX1280_VALUES::RANGING_RESULT_MUX_DEBIASED_WRITE, nullptr, 3, &sta);
+  uint8_t read_mux_tx[4] = {static_cast<uint8_t>(SX1280_VALUES::REG_RANGING_RESULT_MUX >> 8),
+                            static_cast<uint8_t>(SX1280_VALUES::REG_RANGING_RESULT_MUX & 0xFF),
+                            0x00,
+                            0x00};
+  uint8_t read_mux_rx[4] = {};
+  hal = device.SPI_write(&SX1280_OPERATIONS::READ_REGISTER_OP_CODE, read_mux_tx, read_mux_rx, 4, &sta);
   if (!step_ok(hal, sta)) {
     log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
   mask |= (1u << 3);
+
+  constexpr uint8_t RESULT_MUX_KEEP_MASK = 0xCF;  // everything except bits [5:4]
+  uint8_t write_mux_tx[3] = {static_cast<uint8_t>(SX1280_VALUES::REG_RANGING_RESULT_MUX >> 8),
+                             static_cast<uint8_t>(SX1280_VALUES::REG_RANGING_RESULT_MUX & 0xFF),
+                             static_cast<uint8_t>((read_mux_rx[3] & RESULT_MUX_KEEP_MASK) | (SX1280_VALUES::RANGING_RESULT_DEBIASED << 4))};
+  hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_REGISTER_OP_CODE, write_mux_tx, nullptr, 3, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 4);
 
   // read the 3-byte result
   uint8_t result_tx[6] = {static_cast<uint8_t>(SX1280_VALUES::REG_RANGING_RESULT_MSB >> 8),
@@ -516,7 +532,7 @@ uint8_t BeaconBridge::get_ranging_result(int32_t* out)
     log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
-  mask |= (1u << 4);
+  mask |= (1u << 5);
 
   int32_t raw_result = static_cast<int32_t>(ByteOrder::get_u24(&result_rx[3]));
 
@@ -529,7 +545,7 @@ uint8_t BeaconBridge::get_ranging_result(int32_t* out)
     log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
-  mask |= (1u << 5);
+  mask |= (1u << 6);
 
   // back to RC standby
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_STANDBY_OP_CODE, &SX1280_VALUES::STDBY_RC_STAND_BY, nullptr, 1, &sta);
@@ -537,7 +553,7 @@ uint8_t BeaconBridge::get_ranging_result(int32_t* out)
     log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
-  mask |= (1u << 6);
+  mask |= (1u << 7);
 
   *out = raw_result * SX1280_VALUES::RANGING_RESULT_TO_CM_MULTIPLIER;
 
@@ -656,6 +672,7 @@ void BeaconBridge::on_ack_recieved(uint16_t irq, bool timer_event, uint32_t tick
       if (to_ranging() == TO_RANGING_FULL_MASK) {
         cursor = 0;
         measures.count = 0;
+        misses = 0;
 
         mode = Mode::RANGING;
         return;
@@ -688,10 +705,12 @@ void BeaconBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)
     return;
   }
 
-  //end of cycle
+  // end of one pass over the collected anchors (finish_cycle() for the finished pass is wired in here later): wait RANGING_PASS_GAP_MS on
+  // TIM6 in RANGING_WAIT, on_ranging_wait() then starts the next pass
   if (cursor >= acks.count) {
-    cursor = 0;
-    measures.count = 0;
+    arm_timer(RANGING_PASS_GAP_MS);
+    mode = Mode::RANGING_WAIT;
+    return;
   }
 
   const AckPacket ack = acks.anchors[cursor];
@@ -707,6 +726,15 @@ void BeaconBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)
   }
 
   mode = Mode::RANGING_REQUESTED;
+}
+
+void BeaconBridge::on_ranging_wait(uint16_t irq, bool timer_event, uint32_t tick)
+{
+  // the pass period is over: start the next pass from the first anchor
+  cursor = 0;
+  measures.count = 0;
+  mode = Mode::RANGING;
+  on_ranging(irq, timer_event, tick);
 }
 
 void BeaconBridge::on_ranging_requested(uint16_t irq, bool timer_event, uint32_t tick)
@@ -730,6 +758,7 @@ void BeaconBridge::on_ranging_requested(uint16_t irq, bool timer_event, uint32_t
     measures.count = static_cast<uint8_t>(cursor + 1);
     BEACON_LOG("[%lu] on_ranging_requested: anchor 0x%08lX -> %ld cm\r\n", (unsigned long)tick, (unsigned long)ack.anchor_id, (long)result);
 
+    misses = 0;
     cursor++;
     mode = Mode::RANGING;
     on_ranging(0, false, tick);  // next anchor right away, no wait for another step()
@@ -739,7 +768,13 @@ void BeaconBridge::on_ranging_requested(uint16_t irq, bool timer_event, uint32_t
   if (irq & SX1280_VALUES::IRQ_BIT_RANGING_MASTER_TIMEOUT) {
     measures.measured[cursor] = {ack, -1, RangeStatus::TIMEOUT};
     measures.count = static_cast<uint8_t>(cursor + 1);
-    BEACON_LOG("[%lu] on_ranging_requested: anchor 0x%08lX timed out\r\n", (unsigned long)tick, (unsigned long)ack.anchor_id);
+    BEACON_LOG("[%lu] on_ranging_requested: anchor 0x%08lX timed out (%u/%u)\r\n",
+               (unsigned long)tick,
+               (unsigned long)ack.anchor_id,
+               static_cast<unsigned>(misses + 1),
+               static_cast<unsigned>(RANGING_MAX_CONSECUTIVE_MISSES));
+
+    misses++;
 
     cursor++;
     mode = Mode::RANGING;
@@ -828,6 +863,11 @@ void BeaconBridge::step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag)
     case Mode::RANGING_REQUESTED:
       if (dio1_event) {
         on_ranging_requested(irq, timer_event, now);
+      }
+      break;
+    case Mode::RANGING_WAIT:  // between two passes: only TIM6 ends the wait
+      if (timer_event) {
+        on_ranging_wait(irq, timer_event, now);
       }
       break;
     case Mode::RECOVER:
