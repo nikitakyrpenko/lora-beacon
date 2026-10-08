@@ -3,8 +3,8 @@
 #include <optional>
 
 #include "BeaconBridge.hpp"
-#include "AckPacket.hpp"
-#include "AckPacketIn.hpp"
+#include "SynAckPacket.hpp"
+#include "SynPacket.hpp"
 #include "ByteOrder.hpp"
 #include "RangeEntry.hpp"
 #include "SX1280Constants.hpp"
@@ -22,7 +22,8 @@
 // Bitmask a multi-step method returns success results
 static constexpr uint16_t TO_RADIO_FULL_MASK = (1u << 7) - 1;
 static constexpr uint16_t TO_RANGING_FULL_MASK = (1u << 9) - 1;
-static constexpr uint16_t SEND_ACK_REQUEST_FULL_MASK = (1u << 4) - 1;
+static constexpr uint16_t SEND_ACK_REQUEST_FULL_MASK = (1u << 5) - 1;
+static constexpr uint16_t SEND_ACK_PACKET_FULL_MASK = (1u << 5) - 1;
 static constexpr uint16_t ACK_LISTEN_FULL_MASK = (1u << 3) - 1;
 static constexpr uint16_t START_RANGING_FULL_MASK = (1u << 2) - 1;
 static constexpr uint16_t GET_RANGING_RESULT_FULL_MASK = (1u << 8) - 1;
@@ -233,13 +234,21 @@ uint16_t BeaconBridge::to_ranging()
   return mask;
 }
 
-uint8_t BeaconBridge::send_ack_request(const AckPacketIn* ack_request)
+uint8_t BeaconBridge::send_ack_request(const SynPacket* ack_request)
 {
   uint16_t mask = 0;
   SX1280Device::SX1280_Status sta{};
   HAL_StatusTypeDef hal;
 
-  // set packet parameters for ack tx
+  // after a collect timeout the chip is still in the continuous RX of the SynAck listen: stop it before reconfiguring for the TX
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_STANDBY_OP_CODE, &SX1280_VALUES::STDBY_RC_STAND_BY, nullptr, 1, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 0);
+
+  // set packet parameters for the wake (SynPacket) tx
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE,
                          LORA_BEACON_PROTOCOL::WAKE_PACKET_PARAM_PAY,
                          nullptr,
@@ -249,7 +258,7 @@ uint8_t BeaconBridge::send_ack_request(const AckPacketIn* ack_request)
     log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
-  mask |= (1u << 0);
+  mask |= (1u << 1);
 
   // write the wake word + ranging-window duration into the TX buffer
   constexpr uint8_t WRITE_BUFFER_SIZE = 1 + LORA_BEACON_PROTOCOL::WAKE_PAYLOAD_LEN;
@@ -264,7 +273,7 @@ uint8_t BeaconBridge::send_ack_request(const AckPacketIn* ack_request)
     log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
-  mask |= (1u << 1);
+  mask |= (1u << 2);
 
   // set irq callback for TX_DONE or TX_TIMEOUT
   uint16_t irq_mask = SX1280_VALUES::IRQ_BIT_TX_DONE | SX1280_VALUES::IRQ_BIT_RX_TX_TIMEOUT;
@@ -277,7 +286,7 @@ uint8_t BeaconBridge::send_ack_request(const AckPacketIn* ack_request)
     log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
-  mask |= (1u << 2);
+  mask |= (1u << 3);
 
   // transmit (single-shot, auto-standby on TxDone)
   uint8_t tx_param[3] = {SX1280_VALUES::PERIOD_BASE_1_MS};
@@ -288,9 +297,79 @@ uint8_t BeaconBridge::send_ack_request(const AckPacketIn* ack_request)
     log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
-  mask |= (1u << 3);
+  mask |= (1u << 4);
 
   BEACON_LOG("[%lu] ack request sent\r\n", (unsigned long)HAL_GetTick());
+
+  return mask;
+}
+
+uint8_t BeaconBridge::send_ack_packet(const AckPacket* ack_packet)
+{
+  uint16_t mask = 0;
+  SX1280Device::SX1280_Status sta{};
+  HAL_StatusTypeDef hal;
+
+  // the SynAck collect leaves the chip in continuous RX: stop it before reconfiguring for the TX
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_STANDBY_OP_CODE, &SX1280_VALUES::STDBY_RC_STAND_BY, nullptr, 1, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 0);
+
+  // packet parameters for the AckPacket's length
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_PACKET_PARAMS_OP_CODE,
+                         LORA_BEACON_PROTOCOL::ACK_PACKET_PARAMS,
+                         nullptr,
+                         LORA_BEACON_PROTOCOL::WAKE_PACKET_PARAM_LEN,
+                         &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 1);
+
+  // write the ack word + ranging window + selected anchors into the TX buffer
+  constexpr uint8_t WRITE_BUFFER_SIZE = 1 + LORA_BEACON_PROTOCOL::ACK_PAYLOAD_LEN;
+  uint8_t buf[WRITE_BUFFER_SIZE] = {0x00};
+
+  if (!ack_packet->serialize(buf + 1, LORA_BEACON_PROTOCOL::ACK_PAYLOAD_LEN)) {
+    BEACON_LOG("[%lu] %s: ack payload serialize failed, mask=0x%X\r\n", (unsigned long)HAL_GetTick(), __func__, mask);
+    return mask;
+  }
+  hal = device.SPI_write(&SX1280_OPERATIONS::WRITE_BUFFER_OP_CODE, buf, nullptr, static_cast<uint16_t>(WRITE_BUFFER_SIZE), &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 2);
+
+  // TX_DONE or the chip's TX timeout on DIO1
+  uint16_t irq_mask = SX1280_VALUES::IRQ_BIT_TX_DONE | SX1280_VALUES::IRQ_BIT_RX_TX_TIMEOUT;
+  uint8_t irq[LORA_BEACON_PROTOCOL::DIO_IRQ_PARAMS_LEN] = {};
+  ByteOrder::put_u16(irq, irq_mask);
+  ByteOrder::put_u16(irq + 2, irq_mask);
+
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, irq, nullptr, LORA_BEACON_PROTOCOL::DIO_IRQ_PARAMS_LEN, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 3);
+
+  // transmit (single-shot with the same short chip timeout as the wake)
+  uint8_t tx_param[3] = {SX1280_VALUES::PERIOD_BASE_1_MS};
+  ByteOrder::put_u16(tx_param + 1, BEACON_CONSTANTS::BEACON_ACK_TX_TIMEOUT_MS);
+
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_TX_OP_CODE, tx_param, nullptr, 3, &sta);
+  if (!step_ok(hal, sta)) {
+    log_step_failure(__func__, mask, hal, sta);
+    return mask;
+  }
+  mask |= (1u << 4);
+
+  BEACON_LOG("[%lu] ack packet (start ranging) sent\r\n", (unsigned long)HAL_GetTick());
 
   return mask;
 }
@@ -321,8 +400,8 @@ uint8_t BeaconBridge::ack_listen()
   }
   mask |= (1u << 1);
 
-  // start timeout-active RX
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_RX_OP_CODE, LORA_BEACON_PROTOCOL::ACK_LISTEN_RX_PARAMS, nullptr, 3, &sta);
+  // continuous RX: the SynAcks of all anchors (one per slot) arrive without any re-arm gap, the collect timer ends the phase
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_RX_OP_CODE, LORA_BEACON_PROTOCOL::RX_UNTIL_STOPPED_PARAMS, nullptr, 3, &sta);
   if (!step_ok(hal, sta)) {
     log_step_failure(__func__, mask, hal, sta);
     return mask;
@@ -334,7 +413,7 @@ uint8_t BeaconBridge::ack_listen()
   return mask;
 }
 
-std::optional<AckPacket> BeaconBridge::get_ack_response()
+std::optional<SynAckPacket> BeaconBridge::get_ack_response()
 {
   SX1280Device::SX1280_Status sta{};
 
@@ -379,7 +458,7 @@ std::optional<AckPacket> BeaconBridge::get_ack_response()
     return std::nullopt;
   }
 
-  return AckPacket::parse(payload + sizeof(LORA_BEACON_PROTOCOL::WAKE_ACK));
+  return SynAckPacket::parse(payload + sizeof(LORA_BEACON_PROTOCOL::WAKE_ACK));
 }
 
 void BeaconBridge::arm_timer(uint32_t ms)
@@ -411,12 +490,34 @@ bool BeaconBridge::rearm_rx()
   return true;
 }
 
-bool BeaconBridge::register_anchor(const AckPacket* ack)
+bool BeaconBridge::register_anchor(const SynAckPacket* ack)
 {
-  for (int i = 0; i < acks.count; i++) {
+  // the AckPacket carries only the low byte of an id, and 0x00 means "unused" there
+  const uint8_t low_byte = static_cast<uint8_t>(ack->anchor_id & 0xFF);
+  if (ack->anchor_id == 0 || low_byte == 0x00) {
+    BEACON_LOG("[%lu] register_anchor: invalid anchor id 0x%08lX\r\n", (unsigned long)HAL_GetTick(), (unsigned long)ack->anchor_id);
+    return false;
+  }
+
+  for (uint8_t i = 0; i < acks.count; i++) {
     if (acks.anchors[i].anchor_id == ack->anchor_id) {
+      return false;  // an anchor in LISTENING answers every wake, so repeats are normal
+    }
+    if (static_cast<uint8_t>(acks.anchors[i].anchor_id & 0xFF) == low_byte) {
+      BEACON_LOG("[%lu] register_anchor: id 0x%08lX shares its low byte with 0x%08lX, rejected\r\n",
+                 (unsigned long)HAL_GetTick(),
+                 (unsigned long)ack->anchor_id,
+                 (unsigned long)acks.anchors[i].anchor_id);
       return false;
     }
+  }
+
+  if (acks.count >= LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT) {
+    return false;  // the set is full: any further anchor stays in LISTENING
+  }
+
+  if (acks.count == 0) {
+    acks.first_tick = HAL_GetTick();
   }
   acks.anchors[acks.count] = *ack;
   acks.count++;
@@ -576,9 +677,18 @@ void BeaconBridge::clear_irq()
 
 void BeaconBridge::on_radio(uint16_t irq, bool timer_event, uint32_t tick)
 {
+  // collected anchors survive across wakes (they keep answering from LISTENING) until the epoch is over: after that the oldest one may have
+  // left, so start the set again
+  if (acks.count > 0 && tick - acks.first_tick >= ACK_EPOCH_MS) {
+    BEACON_LOG("[%lu] on_radio: ack epoch over, dropping %u anchor(s)\r\n", (unsigned long)tick, static_cast<unsigned>(acks.count));
+    acks = {};
+  }
+  measures = {};
+  cursor = 0;
+
   //can be static consexper
-  AckPacketIn ack = {{LORA_BEACON_PROTOCOL::WAKE_WORD[0], LORA_BEACON_PROTOCOL::WAKE_WORD[1]},
-                     LORA_BEACON_PROTOCOL::DEFAULT_RANGING_WINDOW_MS};
+  SynPacket ack = {{LORA_BEACON_PROTOCOL::WAKE_WORD[0], LORA_BEACON_PROTOCOL::WAKE_WORD[1]},
+                   LORA_BEACON_PROTOCOL::DEFAULT_RANGING_WINDOW_MS};
 
   uint8_t r = send_ack_request(&ack);
   if (r != SEND_ACK_REQUEST_FULL_MASK) {
@@ -656,30 +766,16 @@ void BeaconBridge::on_ack_listen(uint16_t irq, bool timer_event, uint32_t tick)
 
 void BeaconBridge::on_ack_recieved(uint16_t irq, bool timer_event, uint32_t tick)
 {
-  std::optional<AckPacket> ack = get_ack_response();
+  std::optional<SynAckPacket> ack = get_ack_response();
 
-  // ack dispatching failed or wake word mismatch
+  // ack dispatching failed or wake word mismatch: the chip is still in continuous RX, keep listening
   if (!ack) {
-    mode = Mode::ACK_REQUESTED;
+    mode = Mode::ACK_LISTENING;
     BEACON_LOG("[%lu] on_ack_recieved: ACK is failed or empty or wake mismatch\r\n", (unsigned long)tick);
     return;
   }
 
-  //if deduped anchor registered and enought anchors -> RANGING
   if (register_anchor(&*ack)) {
-    if (acks.count >= LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT) {
-      disarm_timer();  // leaving the collect phase
-      if (to_ranging() == TO_RANGING_FULL_MASK) {
-        cursor = 0;
-        measures.count = 0;
-        misses = 0;
-
-        mode = Mode::RANGING;
-        return;
-      }
-      mode = Mode::RECOVER;
-      return;
-    }
     arm_timer(ACK_COLLECT_TIMEOUT_MS);  // a new anchor answered: restart the inactivity window
     BEACON_LOG("[%lu] on_ack_recieved: ACK is confirmed (%u/%u anchors)\r\n",
                (unsigned long)tick,
@@ -693,8 +789,68 @@ void BeaconBridge::on_ack_recieved(uint16_t irq, bool timer_event, uint32_t tick
                static_cast<unsigned>(LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT));
   }
 
-  // not enough anchors collected, or a duplicate: back to listening
-  mode = Mode::ACK_REQUESTED;
+  // enought anchors collected
+  if (acks.count >= LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT) {
+    disarm_timer();  // leaving the collect phase
+
+    //prepeare ack packet
+    AckPacket start{};
+    for (uint8_t i = 0; i < LORA_BEACON_PROTOCOL::ACK_WORD_LEN; i++) {
+      start.ack_word[i] = LORA_BEACON_PROTOCOL::ACK_WORD[i];
+    }
+    start.ranging_window_ms = LORA_BEACON_PROTOCOL::DEFAULT_RANGING_WINDOW_MS;
+    for (uint8_t i = 0; i < acks.count && i < LORA_BEACON_PROTOCOL::ACK_MAX_ANCHORS; i++) {
+      start.anchor_ids[i] = static_cast<uint8_t>(acks.anchors[i].anchor_id & 0xFF);
+    }
+
+    const uint8_t r = send_ack_packet(&start);
+    if (r != SEND_ACK_PACKET_FULL_MASK) {
+      BEACON_LOG(
+        "[%lu] on_ack_recieved: send_ack_packet failed mask=0x%X (full=0x%X)\r\n", (unsigned long)tick, r, SEND_ACK_PACKET_FULL_MASK);
+      mode = Mode::RECOVER;
+      return;
+    }
+    mode = Mode::START_IN_PROGRESS;
+    return;
+  }
+
+  // not enough anchors collected yet: the chip is still in continuous RX, keep listening
+  mode = Mode::ACK_LISTENING;
+}
+
+void BeaconBridge::on_start_in_progress(uint16_t irq, bool timer_event, uint32_t tick)
+{
+  // the command did not leave: the collected anchors stay in the set, discovery sends a wake again and the next ack triggers the command
+  if (irq & SX1280_VALUES::IRQ_BIT_RX_TX_TIMEOUT) {
+    BEACON_LOG("[%lu] on_start_in_progress: TX timeout (irq=0x%X)\r\n", (unsigned long)tick, irq);
+    mode = Mode::RADIO;
+    return;
+  }
+
+  if (irq & SX1280_VALUES::IRQ_BIT_TX_DONE) {
+    BEACON_LOG(
+      "[%lu] on_start_in_progress: TX Done, waiting %lu ms for the anchors\r\n", (unsigned long)tick, (unsigned long)START_GUARD_MS);
+    arm_timer(START_GUARD_MS);
+    mode = Mode::START_WAIT;
+    return;
+  }
+
+  mode = Mode::RECOVER;
+}
+
+void BeaconBridge::on_start_wait(uint16_t irq, bool timer_event, uint32_t tick)
+{
+  // the anchors have had START_GUARD_MS to switch: switch the beacon as well and start the first pass
+  const uint16_t r = to_ranging();
+  if (r != TO_RANGING_FULL_MASK) {
+    BEACON_LOG("[%lu] on_start_wait: to_ranging failed mask=0x%X (full=0x%X)\r\n", (unsigned long)tick, r, TO_RANGING_FULL_MASK);
+    mode = Mode::RECOVER;
+    return;
+  }
+
+  cursor = 0;
+  measures = {};
+  mode = Mode::RANGING;
 }
 
 void BeaconBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)
@@ -705,15 +861,13 @@ void BeaconBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)
     return;
   }
 
-  // end of one pass over the collected anchors (finish_cycle() for the finished pass is wired in here later): wait RANGING_PASS_GAP_MS on
-  // TIM6 in RANGING_WAIT, on_ranging_wait() then starts the next pass
   if (cursor >= acks.count) {
     arm_timer(RANGING_PASS_GAP_MS);
     mode = Mode::RANGING_WAIT;
     return;
   }
 
-  const AckPacket ack = acks.anchors[cursor];
+  const SynAckPacket ack = acks.anchors[cursor];
   const uint8_t r = start_ranging(ack.anchor_id);
   if (r != START_RANGING_FULL_MASK) {
     BEACON_LOG("[%lu] on_ranging: request for anchor 0x%08lX failed, mask=0x%X (full=0x%X)\r\n",
@@ -730,7 +884,7 @@ void BeaconBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)
 
 void BeaconBridge::on_ranging_wait(uint16_t irq, bool timer_event, uint32_t tick)
 {
-  // the pass period is over: start the next pass from the first anchor
+  // finish iter
   cursor = 0;
   measures.count = 0;
   mode = Mode::RANGING;
@@ -739,7 +893,7 @@ void BeaconBridge::on_ranging_wait(uint16_t irq, bool timer_event, uint32_t tick
 
 void BeaconBridge::on_ranging_requested(uint16_t irq, bool timer_event, uint32_t tick)
 {
-  const AckPacket ack = acks.anchors[cursor];
+  const SynAckPacket ack = acks.anchors[cursor];
 
   if (irq & SX1280_VALUES::IRQ_BIT_RANGING_MASTER_RESULT_VALID) {
     int32_t result = 0;
@@ -754,11 +908,10 @@ void BeaconBridge::on_ranging_requested(uint16_t irq, bool timer_event, uint32_t
       return;
     }
 
-    measures.measured[cursor] = {ack, result, RangeStatus::OK};
+    measures.measured[cursor] = {ack, result, RangeStatus::OK, 0};
     measures.count = static_cast<uint8_t>(cursor + 1);
     BEACON_LOG("[%lu] on_ranging_requested: anchor 0x%08lX -> %ld cm\r\n", (unsigned long)tick, (unsigned long)ack.anchor_id, (long)result);
 
-    misses = 0;
     cursor++;
     mode = Mode::RANGING;
     on_ranging(0, false, tick);  // next anchor right away, no wait for another step()
@@ -766,15 +919,36 @@ void BeaconBridge::on_ranging_requested(uint16_t irq, bool timer_event, uint32_t
   }
 
   if (irq & SX1280_VALUES::IRQ_BIT_RANGING_MASTER_TIMEOUT) {
-    measures.measured[cursor] = {ack, -1, RangeStatus::TIMEOUT};
+    RangeEntry* range = &measures.measured[cursor];
+    const uint8_t timeouts = static_cast<uint8_t>(range->timeout + 1);  // consecutive timeouts of this anchor, including this one
+
+    // this anchor is down: forget everything and go back to discovery. The chip is still in ranging packet type, so reconfigure it first.
+    if (timeouts >= RANGING_MAX_CONSECUTIVE_MISSES) {
+      BEACON_LOG("[%lu] on_ranging_requested: reached maximum retries on anchor 0x%08lX (%u/%u), back to discovery\r\n",
+                 (unsigned long)tick,
+                 (unsigned long)ack.anchor_id,
+                 static_cast<unsigned>(timeouts),
+                 static_cast<unsigned>(RANGING_MAX_CONSECUTIVE_MISSES));
+      acks = {};
+      measures = {};
+      cursor = 0;
+      if (to_radio() != TO_RADIO_FULL_MASK) {  // sets mode = RADIO on success
+        mode = Mode::RECOVER;
+      }
+      return;
+    }
+
+    range->anchor = ack;
+    range->distance_cm = -1;
+    range->status = RangeStatus::TIMEOUT;
+    range->timeout = timeouts;
     measures.count = static_cast<uint8_t>(cursor + 1);
+
     BEACON_LOG("[%lu] on_ranging_requested: anchor 0x%08lX timed out (%u/%u)\r\n",
                (unsigned long)tick,
                (unsigned long)ack.anchor_id,
-               static_cast<unsigned>(misses + 1),
+               static_cast<unsigned>(timeouts),
                static_cast<unsigned>(RANGING_MAX_CONSECUTIVE_MISSES));
-
-    misses++;
 
     cursor++;
     mode = Mode::RANGING;
@@ -856,6 +1030,16 @@ void BeaconBridge::step(volatile uint8_t& dio1_flag, volatile uint8_t& tim_flag)
       break;
     case Mode::ACK_RECIEVED:
       on_ack_recieved(irq, timer_event, now);
+      break;
+    case Mode::START_IN_PROGRESS:  // AckPacket on air: waits for TX_DONE or the chip's TX timeout
+      if (dio1_event) {
+        on_start_in_progress(irq, timer_event, now);
+      }
+      break;
+    case Mode::START_WAIT:  // only TIM6 ends the wait
+      if (timer_event) {
+        on_start_wait(irq, timer_event, now);
+      }
       break;
     case Mode::RANGING:
       on_ranging(irq, timer_event, now);

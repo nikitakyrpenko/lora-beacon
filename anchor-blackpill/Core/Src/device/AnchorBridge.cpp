@@ -2,9 +2,10 @@
 #include <cstdint>
 #include <optional>
 
-#include "AckPacket.hpp"
+#include "SynAckPacket.hpp"
 #include "AnchorBridge.hpp"
-#include "AckPacketIn.hpp"
+#include "SynPacket.hpp"
+#include "AckPacket.hpp"
 #include "ByteOrder.hpp"
 #include "SX1280Constants.hpp"
 #include "SX1280Device.hpp"
@@ -40,7 +41,7 @@ void log_step_failure(const char* func, uint16_t mask, HAL_StatusTypeDef hal, co
              mask);
 }
 
-bool is_wake_word_matches(const AckPacketIn& ack)
+bool is_wake_word_matches(const SynPacket& ack)
 {
   for (uint8_t i = 0; i < LORA_BEACON_PROTOCOL::WAKE_WORD_LEN; ++i) {
     if (ack.wake_word[i] != LORA_BEACON_PROTOCOL::WAKE_WORD[i]) {
@@ -50,14 +51,14 @@ bool is_wake_word_matches(const AckPacketIn& ack)
   return true;
 }
 
-uint16_t clamp_ranging_window(const AckPacketIn& ack)
+uint16_t clamp_ranging_window(uint16_t window_ms)
 {
-  uint16_t dur = ack.ranging_window_ms;
+  uint16_t dur = window_ms;
 
-  if (ack.ranging_window_ms < LORA_BEACON_PROTOCOL::RANGING_WINDOW_MIN_MS) {
+  if (window_ms < LORA_BEACON_PROTOCOL::RANGING_WINDOW_MIN_MS) {
     dur = LORA_BEACON_PROTOCOL::RANGING_WINDOW_MIN_MS;
   }
-  else if (ack.ranging_window_ms > LORA_BEACON_PROTOCOL::RANGING_WINDOW_MAX_MS) {
+  else if (window_ms > LORA_BEACON_PROTOCOL::RANGING_WINDOW_MAX_MS) {
     dur = LORA_BEACON_PROTOCOL::RANGING_WINDOW_MAX_MS;
   }
   return dur;
@@ -159,7 +160,7 @@ uint16_t AnchorBridge::to_radio(bool duty_cycle)
   mask |= (1u << 6);
 
   // route RxDone interrupt to DIO1
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, LORA_BEACON_PROTOCOL::IDLE_RX_IRQ_MASK, nullptr, 8, &sta);
+  hal = device.SPI_write(&SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, LORA_BEACON_PROTOCOL::LISTEN_IRQ_MASK, nullptr, 8, &sta);
   if (!step_ok(hal, sta)) {
     log_step_failure(__func__, mask, hal, sta);
     return mask;
@@ -307,7 +308,7 @@ bool AnchorBridge::rearm_rx()
 
 uint16_t AnchorBridge::send_ack()
 {
-  const AckPacket ack{ANCHOR_ADDRESS, ANCHOR_X_CM, ANCHOR_Y_CM, ANCHOR_Z_CM};
+  const SynAckPacket ack{ANCHOR_ADDRESS, ANCHOR_X_CM, ANCHOR_Y_CM, ANCHOR_Z_CM};
 
   std::array<uint8_t, 1 + LORA_BEACON_PROTOCOL::WAKE_ACK_PAYLOAD_LEN> payload = {
     0x00, LORA_BEACON_PROTOCOL::WAKE_ACK[0], LORA_BEACON_PROTOCOL::WAKE_ACK[1]};
@@ -334,14 +335,7 @@ uint16_t AnchorBridge::send_ack()
   }
   mask |= (1u << 1);
 
-  // route TxDone interrupt to DIO1 -- whatever IrqMask to_radio() left active (RX_DONE only) would never latch
-  // TX_DONE into the IrqStatus register at all, so this must be reprogrammed before SetTx for the poll below to work
-  hal = device.SPI_write(&SX1280_OPERATIONS::SET_DIO_IRQ_PARAMS_OP_CODE, LORA_BEACON_PROTOCOL::TX_DONE_IRQ_MASK, nullptr, 8, &sta);
-  if (!step_ok(hal, sta)) {
-    log_step_failure(__func__, mask, hal, sta);
-    return mask;
-  }
-  mask |= (1u << 2);
+  // no IRQ step: the LISTENING routing set by to_radio() (LISTEN_IRQ_MASK) already includes TX_DONE
 
   // transmit the ack
   hal = device.SPI_write(&SX1280_OPERATIONS::SET_TX_OP_CODE, LORA_BEACON_PROTOCOL::TX_SINGLE_SHOT_PARAMS, nullptr, 3, &sta);
@@ -349,14 +343,33 @@ uint16_t AnchorBridge::send_ack()
     log_step_failure(__func__, mask, hal, sta);
     return mask;
   }
-  mask |= (1u << 3);
+  mask |= (1u << 2);
 
-  ANCHOR_LOG("[%lu] send_ranging_slave_ack mask=0x%X (full=0x%X)\r\n", (unsigned long)HAL_GetTick(), mask, 0b1111);
+  ANCHOR_LOG("[%lu] send_ranging_slave_ack mask=0x%X (full=0x%X)\r\n", (unsigned long)HAL_GetTick(), mask, ACK_SUCCESS);
 
   return mask;
 }
 
-std::optional<AckPacketIn> AnchorBridge::get_ack_packet()
+HAL_StatusTypeDef AnchorBridge::read_rx_length(uint8_t* len_out)
+{
+  SX1280Device::SX1280_Status sta{};
+
+  constexpr uint8_t BUFF_STA_SIZE = 3;
+  uint8_t tx_buff_sta[BUFF_STA_SIZE] = {};
+  uint8_t rx_buff_sta[BUFF_STA_SIZE] = {};
+
+  // GetRxBufferStatus -> [status][payload length][start pointer]
+  HAL_StatusTypeDef hal = device.SPI_write(&SX1280_OPERATIONS::READ_BUFFER_STATUS_OP_CODE, tx_buff_sta, rx_buff_sta, BUFF_STA_SIZE, &sta);
+  if (!step_ok(hal, sta)) {
+    ANCHOR_LOG("[%lu] rx length read failed, hal=%d\r\n", (unsigned long)HAL_GetTick(), static_cast<int>(hal));
+    return hal == HAL_OK ? HAL_ERROR : hal;
+  }
+
+  *len_out = rx_buff_sta[1];
+  return HAL_OK;
+}
+
+std::optional<SynPacket> AnchorBridge::get_syn_packet()
 {
   SX1280Device::SX1280_Status sta{};
 
@@ -394,9 +407,51 @@ std::optional<AckPacketIn> AnchorBridge::get_ack_packet()
     return std::nullopt;
   }
 
-  AckPacketIn ack = AckPacketIn::parse(rx_buff_read + BUFFER_OFFSET_SIZE);
+  SynPacket ack = SynPacket::parse(rx_buff_read + BUFFER_OFFSET_SIZE);
   return ack;
 };
+
+std::optional<AckPacket> AnchorBridge::get_ack_packet()
+{
+  SX1280Device::SX1280_Status sta{};
+
+  constexpr uint8_t BUFF_STA_SIZE = 3;
+  uint8_t tx_buff_sta[BUFF_STA_SIZE] = {};
+  uint8_t rx_buff_sta[BUFF_STA_SIZE] = {};
+
+  // read RX buffer status -> length + start
+  HAL_StatusTypeDef hal = device.SPI_write(&SX1280_OPERATIONS::READ_BUFFER_STATUS_OP_CODE, tx_buff_sta, rx_buff_sta, BUFF_STA_SIZE, &sta);
+  if (!step_ok(hal, sta)) {
+    ANCHOR_LOG("[%lu] buffer read failed, hal=%d\r\n", (unsigned long)HAL_GetTick(), static_cast<int>(hal));
+    return std::nullopt;
+  }
+
+  uint8_t len = rx_buff_sta[1];
+  uint8_t beg = rx_buff_sta[2];
+
+  // if value of buffer shorter or longer then ACK_PAYLOAD_LEN -> return early
+  if (len != LORA_BEACON_PROTOCOL::ACK_PAYLOAD_LEN) {
+    ANCHOR_LOG(
+      "[%lu] unexpected payload len=%u (expected %u)\r\n", (unsigned long)HAL_GetTick(), len, LORA_BEACON_PROTOCOL::ACK_PAYLOAD_LEN);
+    return std::nullopt;
+  }
+
+  constexpr uint8_t BUFFER_OFFSET_SIZE = 2;  // the buffer offset to start reading from + a mandatory dummy value
+  constexpr uint8_t BUFF_READ_SIZE = BUFFER_OFFSET_SIZE + LORA_BEACON_PROTOCOL::ACK_PAYLOAD_LEN;
+
+  uint8_t tx_buff_read[BUFF_READ_SIZE] = {beg};
+  uint8_t rx_buff_read[BUFF_READ_SIZE] = {};
+
+  // read the received payload
+  hal = device.SPI_write(&SX1280_OPERATIONS::READ_BUFFER_OP_CODE, tx_buff_read, rx_buff_read, static_cast<uint16_t>(BUFF_READ_SIZE), &sta);
+  if (!step_ok(hal, sta)) {
+    ANCHOR_LOG("[%lu] payload read failed, hal=%d\r\n", (unsigned long)HAL_GetTick(), static_cast<int>(hal));
+    return std::nullopt;
+  }
+
+  // the caller checks word_matches() and selects(own low byte)
+  return AckPacket::parse(rx_buff_read + BUFFER_OFFSET_SIZE);
+}
 
 HAL_StatusTypeDef AnchorBridge::get_status(SX1280Device::SX1280_Status* sta_out)
 {
@@ -485,35 +540,73 @@ void AnchorBridge::on_listen(uint16_t irq, bool timer_event, uint32_t tick)
 
   if (irq & SX1280_VALUES::IRQ_BIT_CRC_ERROR) {
     ANCHOR_LOG("[%lu] on_listen: CRC error (irq=0x%X)\r\n", (unsigned long)tick, irq);
-    try_recover(tick);
+    rearm_rx();
     return;
   }
 
   if (irq & SX1280_VALUES::IRQ_BIT_RX_DONE) {
-    std::optional<AckPacketIn> ack = get_ack_packet();
-
-    if (ack) {
-      if (is_wake_word_matches(*ack)) {
-        mode = Mode::ACK_REQUESTED;
-        latch.ranging = clamp_ranging_window(*ack);
-        ANCHOR_LOG("[%lu] wake word matched (ranging window %lums, ack delay %lums)\r\n",
-                   (unsigned long)tick,
-                   (unsigned long)latch.ranging,
-                   (unsigned long)latch.ack);
-        arm_timer(latch.ack);
-
-        return;
-      }
-      else {
-        ANCHOR_LOG("[%lu] on_listen: wake_word mismatch (irq=0x%X)\r\n", (unsigned long)tick, irq);
-        if (mode == Mode::IDLE) {
-          mode = Mode::LISTENING;
-          arm_timer(ACK_LISTENING_WINDOW_MS);
-        }
-        rearm_rx();
-        return;
-      }
+    uint8_t len = 0;
+    if (read_rx_length(&len) != HAL_OK) {
+      try_recover(tick);
+      return;
     }
+
+    // SynPacket
+    if (len == LORA_BEACON_PROTOCOL::WAKE_PAYLOAD_LEN) {
+      const std::optional<SynPacket> syn = get_syn_packet();
+      if (!syn) {
+        try_recover(tick);  // the length matched, so this is an SPI failure
+        return;
+      }
+
+      if (is_wake_word_matches(*syn)) {
+        mode = Mode::ACK_REQUESTED;
+        ANCHOR_LOG("[%lu] wake word matched (ack delay %lums)\r\n", (unsigned long)tick, (unsigned long)latch.ack);
+        arm_timer(latch.ack);
+        return;
+      }
+
+      ANCHOR_LOG("[%lu] on_listen: wake_word mismatch (irq=0x%X)\r\n", (unsigned long)tick, irq);
+      rearm_rx();
+      return;
+    }
+
+    // AckPacket
+    if (len == LORA_BEACON_PROTOCOL::ACK_PAYLOAD_LEN) {
+      const std::optional<AckPacket> ack = get_ack_packet();
+      if (!ack) {
+        try_recover(tick);
+        return;
+      }
+
+      if (ack->word_matches() && ack->selects(static_cast<uint8_t>(ANCHOR_ADDRESS & 0xFF))) {
+        latch.ranging = clamp_ranging_window(ack->ranging_window_ms);
+        ANCHOR_LOG("[%lu] ack matched (ranging window %lums)\r\n", (unsigned long)tick, (unsigned long)latch.ranging);
+
+        const uint16_t r = to_ranging();
+        if (r != RANGING_SUCCESS) {
+          ANCHOR_LOG("[%lu] on_listen: to_ranging_slave failed mask=0x%X (full=0x%X)\r\n", (unsigned long)tick, r, RANGING_SUCCESS);
+          try_recover(tick);
+          return;
+        }
+
+        // the ranging window starts once the slave is armed
+        mode = Mode::RANGING;
+        arm_timer(RANGING_REQUEST_TIMEOUT_MS);
+        ANCHOR_LOG("[%lu] entering RANGING\r\n", (unsigned long)tick);
+        return;
+      }
+
+      // if beacon selected other anchors but not this to start ranging
+      ANCHOR_LOG("[%lu] on_listen: ack not for this anchor (irq=0x%X)\r\n", (unsigned long)tick, irq);
+      rearm_rx();
+      return;
+    }
+
+    // foreign traffic on the same BW -> ignore
+    ANCHOR_LOG("[%lu] on_listen: ignored frame, len=%u\r\n", (unsigned long)tick, static_cast<unsigned>(len));
+    rearm_rx();
+    return;
   }
 
   //any other case rollback to recover
@@ -536,7 +629,7 @@ void AnchorBridge::on_ack_requested(uint16_t irq, uint32_t tick)
 
 void AnchorBridge::on_ack_in_progress(uint16_t irq, uint32_t hal_tick)
 {
-  // ack tx done -- proceed straight into arming the ranging slave, nothing else waits on this transition
+  // SynAck tx done
   if (irq & SX1280_VALUES::IRQ_BIT_TX_DONE) {
     disarm_timer();
     ANCHOR_LOG("[%lu] send_ranging_slave_ack: TX_DONE confirmed (irq_mask=0x%X)\r\n", (unsigned long)hal_tick, irq);
@@ -550,17 +643,16 @@ void AnchorBridge::on_ack_in_progress(uint16_t irq, uint32_t hal_tick)
 
 void AnchorBridge::on_ack_done(uint16_t irq, uint32_t tick)
 {
-  const uint16_t r = to_ranging();
-  if (r != RANGING_SUCCESS) {
-    ANCHOR_LOG("[%lu] on_ack_done: to_ranging_slave failed mask=0x%X (full=0x%X)\r\n", (unsigned long)tick, r, RANGING_SUCCESS);
+  //SynPacket out -> rearm tx for listen Syn/Ack
+  if (!rearm_rx()) {
+    ANCHOR_LOG("[%lu] on_ack_done: rearm_rx failed\r\n", (unsigned long)tick);
     try_recover(tick);
     return;
   }
 
-  // the ranging window starts once the slave is armed
-  mode = Mode::RANGING;
-  arm_timer(RANGING_REQUEST_TIMEOUT_MS);
-  ANCHOR_LOG("[%lu] entering RANGING\r\n", (unsigned long)tick);
+  mode = Mode::LISTENING;
+  arm_timer(ACK_LISTENING_WINDOW_MS);
+  ANCHOR_LOG("[%lu] SynAck sent, LISTENING for the start command\r\n", (unsigned long)tick);
 }
 
 void AnchorBridge::on_ranging(uint16_t irq, bool timer_event, uint32_t tick)

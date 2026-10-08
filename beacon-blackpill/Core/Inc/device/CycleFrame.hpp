@@ -8,14 +8,14 @@
 #include "SX1280Constants.hpp"
 
 // Binary frame sent over the UART for one finished cycle: a plain uint8_t array, all multi-byte values MSB-first (same as
-// the ack, see AckPacket).
+// the ack, see SynAckPacket).
 //
 //   [0xA5][0x5A]              sync
 //   [length]                  bytes from `cycle` up to and including the last entry (everything before the checksum)
 //   [cycle: 4]                running counter, lets the receiver notice lost cycles
 //   [tick_ms: 4]              beacon HAL tick when the cycle finished
 //   [count: 1]                anchors that acked = number of entries; 0 is valid (nobody answered the wake-up)
-//   count x entry (15 bytes): [anchor id: 4][x_cm: 2][y_cm: 2][z_cm: 2]   (AckPacket, int16 cm from the site origin)
+//   count x entry (15 bytes): [anchor id: 4][x_cm: 2][y_cm: 2][z_cm: 2]   (SynAckPacket, int16 cm from the site origin)
 //                             [distance_cm: 4, int32, -1 unless status == 0][status: 1: 0 OK, 1 TIMEOUT, 2 FAILED]
 //   [checksum: 1]             XOR of every byte from [length] through the last entry
 //
@@ -25,7 +25,7 @@ namespace CycleFrame {
 
 static constexpr uint8_t SYNC_0 = 0xA5;
 static constexpr uint8_t SYNC_1 = 0x5A;
-static constexpr size_t ENTRY_BYTES = AckPacket::SIZE + sizeof(int32_t) + sizeof(uint8_t);     // 15
+static constexpr size_t ENTRY_BYTES = SynAckPacket::SIZE + sizeof(int32_t) + sizeof(uint8_t);     // 15
 static constexpr size_t HEADER_BYTES = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t);  // cycle + tick + count
 static constexpr size_t MAX_BYTES =
   2 /*sync*/ + 1 /*length*/ + HEADER_BYTES + LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT * ENTRY_BYTES + 1 /*checksum*/;
@@ -55,7 +55,7 @@ inline size_t Serialize(uint32_t cycle, uint32_t tick_ms, const RangeEntry* entr
   out[pos++] = count;
   for (uint8_t i = 0; i < count; ++i) {
     entries[i].anchor.serialize(&out[pos]);
-    pos += AckPacket::SIZE;
+    pos += SynAckPacket::SIZE;
     ByteOrder::put_i32(&out[pos], entries[i].distance_cm);
     pos += 4;
     out[pos++] = static_cast<uint8_t>(entries[i].status);

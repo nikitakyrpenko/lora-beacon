@@ -2,20 +2,34 @@
 
 #include <cstdint>
 #include <optional>
-#include "AckPacketIn.hpp"
+#include "SynPacket.hpp"
 #include "SX1280Constants.hpp"
+#include "SynAckPacket.hpp"
 #include "AckPacket.hpp"
 #include "CycleFrame.hpp"
 #include "RangeEntry.hpp"
 #include "SX1280Device.hpp"
 #include "stm32h5xx_hal_tim.h"
 
-enum class Mode { RADIO, ACK_IN_PROGRESS, ACK_REQUESTED, ACK_LISTENING, ACK_RECIEVED, RANGING, RANGING_REQUESTED, RANGING_WAIT, RECOVER };
+enum class Mode {
+  RADIO,
+  ACK_IN_PROGRESS,
+  ACK_REQUESTED,
+  ACK_LISTENING,
+  ACK_RECIEVED,
+  START_IN_PROGRESS,  // the AckPacket (start ranging) is on air
+  START_WAIT,         // sent, giving the anchors START_GUARD_MS to switch to ranging
+  RANGING,
+  RANGING_REQUESTED,
+  RANGING_WAIT,
+  RECOVER
+};
 
 class BeaconBridge {
   struct AckBag {
-    AckPacket anchors[LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT] = {};
+    SynAckPacket anchors[LORA_BEACON_PROTOCOL::EXPECTED_ANCHOR_COUNT] = {};
     uint8_t count = 0;
+    uint32_t first_tick = 0;  // when the first anchor of this set acked: the set is dropped once ACK_EPOCH_MS have passed
   };
 
   struct RangeBag {
@@ -39,7 +53,6 @@ class BeaconBridge {
   Recover recover = {};
 
   uint8_t cursor = 0;  // global index currently being ranged
-  uint8_t misses = 0;  // consecutive ranging timeouts, reset by any result and on entering RANGING
 
   // outcome of the cycle in progress, and the frame of the last finished one (see take_frame())
   uint32_t cycle_counter;
@@ -51,10 +64,15 @@ public:
   // Ack-collect inactivity timeout: armed once on the wake's TX_DONE and restarted by every NEW anchor's ack. Chip RX
   // timeouts (one listen window) don't touch it, so it only expires when no new ack arrived for this long.
   static constexpr uint32_t ACK_COLLECT_TIMEOUT_MS = 250;
+  // Collected anchors stay in the set across several wakes (they keep answering from LISTENING) for this long from the first ack. It must
+  // stay below the anchors' 5 s listen window, which every SYN they hear refreshes.
+  static constexpr uint32_t ACK_EPOCH_MS = 3000;
+  // Pause between the AckPacket's TX_DONE and the beacon's own switch to ranging: the anchors need to run to_ranging() (about ten SPI commands)
+  static constexpr uint32_t START_GUARD_MS = 20;
   // RECOVER: delay between two attempts, and how many plain to_radio() retries come before an NRESET of the chip
   // Consecutive ranging timeouts after which the beacon gives up and goes back to RADIO to send a new wake. Without it a deaf anchor
   // keeps receiving ranging requests it cannot decode (header errors) and no wake ever reaches it.
-  static constexpr uint8_t RANGING_MAX_CONSECUTIVE_MISSES = 20;
+  static constexpr uint8_t RANGING_MAX_CONSECUTIVE_MISSES = 5;
   // Idle gap between two passes over all collected anchors (RANGING_WAIT, ended by TIM6). The rate is 1 / (gap + pass duration), so with
   // one anchor (about 6 ms per pass) 100 ms is about 9.4 Hz and 200 ms about 4.9 Hz; it drops slightly as anchors are added.
   static constexpr uint32_t RANGING_PASS_GAP_MS = 200;
@@ -90,9 +108,10 @@ public:
   uint16_t to_radio();
   uint16_t to_ranging();
 
-  uint8_t send_ack_request(const AckPacketIn* pack);
+  uint8_t send_ack_request(const SynPacket* pack);
+  uint8_t send_ack_packet(const AckPacket* pack);
   uint8_t ack_listen();
-  std::optional<AckPacket> get_ack_response();
+  std::optional<SynAckPacket> get_ack_response();
 
   uint8_t start_ranging(uint32_t anchor_id);
   uint8_t get_ranging_result(int32_t* out);
@@ -102,7 +121,7 @@ public:
 
   bool rearm_rx();
 
-  bool register_anchor(const AckPacket* ack);
+  bool register_anchor(const SynAckPacket* ack);
 
   // helpers kept from the old flow for the cycle/frame logic and bring-up
   HAL_StatusTypeDef get_status(SX1280Device::SX1280_Status* sta_out);
@@ -124,6 +143,8 @@ public:
   void on_ack_requested(uint16_t irq, bool timer_event, uint32_t tick);
   void on_ack_listen(uint16_t irq, bool timer_event, uint32_t tick);
   void on_ack_recieved(uint16_t irq, bool timer_event, uint32_t tick);
+  void on_start_in_progress(uint16_t irq, bool timer_event, uint32_t tick);
+  void on_start_wait(uint16_t irq, bool timer_event, uint32_t tick);
   void on_ranging(uint16_t irq, bool timer_event, uint32_t tick);
   void on_ranging_requested(uint16_t irq, bool timer_event, uint32_t tick);
   void on_ranging_wait(uint16_t irq, bool timer_event, uint32_t tick);

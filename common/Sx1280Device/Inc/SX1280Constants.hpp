@@ -298,6 +298,24 @@ static constexpr uint8_t WAKE_ACK_PACKET_PARAMS[WAKE_PACKET_PARAM_LEN] = {SX1280
                                                                           0x00,
                                                                           0x00};
 
+// Third step of the handshake (SynPacket = the wake, SynAckPacket = the anchor's answer, AckPacket = this): the beacon tells the anchors it
+// selected to switch to ranging. Payload: [ACK_WORD (2)] [ranging window ms, u16 MSB-first] [ACK_MAX_ANCHORS x low byte of the selected
+// anchor's ranging address, 0x00 = unused]. The low byte is what the chip's 8-bit ranging address check compares, so it is already unique.
+static constexpr uint8_t ACK_WORD_LEN = 2;
+static constexpr uint8_t ACK_WORD[ACK_WORD_LEN] = {0xC3, 0x5A};
+static constexpr uint8_t ACK_MAX_ANCHORS = 3;
+static_assert(EXPECTED_ANCHOR_COUNT <= ACK_MAX_ANCHORS, "the AckPacket must have an id slot for every anchor the beacon waits for");
+static constexpr uint8_t ACK_PAYLOAD_LEN = ACK_WORD_LEN + sizeof(uint16_t) + ACK_MAX_ANCHORS;
+static_assert(ACK_PAYLOAD_LEN != WAKE_PAYLOAD_LEN && ACK_PAYLOAD_LEN != WAKE_ACK_PAYLOAD_LEN,
+              "the three handshake packets are told apart by length (and magic), so their lengths must differ");
+static constexpr uint8_t ACK_PACKET_PARAMS[WAKE_PACKET_PARAM_LEN] = {SX1280_VALUES::LORA_PREAMBLE_12_SYMBOLS,
+                                                                     SX1280_VALUES::EXPLICIT_HEADER,
+                                                                     ACK_PAYLOAD_LEN,
+                                                                     SX1280_VALUES::LORA_CRC_ENABLE,
+                                                                     SX1280_VALUES::LORA_IQ_STD,
+                                                                     0x00,
+                                                                     0x00};
+
 // SetDioIrqParams payload routing RX_DONE, HEADER_ERROR and CRC_ERROR to DIO1 (irqMask + dio1Mask both set, dio2Mask/dio3Mask
 // left 0) -- used by the anchor's radio-mode idle-listen setup. The two error bits let the anchor tell a corrupted packet from a
 // good one (and learn that its single-shot RX has ended).
@@ -312,6 +330,19 @@ static constexpr uint8_t IDLE_RX_IRQ_MASK[8] = {static_cast<uint8_t>(IDLE_RX_IRQ
                                                 0x0,
                                                 0x0};
 
+// SetDioIrqParams payload for the anchor's LISTENING state AND its SynAck transmission: the IDLE_RX bits plus TX_DONE. One routing for both, so
+// after the SynAck's TX the anchor goes back to RX with a bare SetRx (no SetDioIrqParams burst), and send_ack() needs no IRQ step of its own.
+// TX_DONE is harmless while listening: it only latches after the anchor's own transmission.
+static constexpr uint16_t LISTEN_IRQ_BITS = IDLE_RX_IRQ_BITS | SX1280_VALUES::IRQ_BIT_TX_DONE;
+static constexpr uint8_t LISTEN_IRQ_MASK[8] = {static_cast<uint8_t>(LISTEN_IRQ_BITS >> 8),
+                                               static_cast<uint8_t>(LISTEN_IRQ_BITS),
+                                               static_cast<uint8_t>(LISTEN_IRQ_BITS >> 8),
+                                               static_cast<uint8_t>(LISTEN_IRQ_BITS),
+                                               0x0,
+                                               0x0,
+                                               0x0,
+                                               0x0};
+
 // SetRx payload meaning "listen indefinitely" (periodBase=1ms, count=0x0000 -> no timeout) -- used by the
 // anchor's radio-mode idle-listen setup.
 static constexpr uint8_t RX_CONTINUOUS_PARAMS[3] = {SX1280_VALUES::PERIOD_BASE_1_MS, 0x00, 0x00};
@@ -320,6 +351,10 @@ static constexpr uint8_t RX_CONTINUOUS_PARAMS[3] = {SX1280_VALUES::PERIOD_BASE_1
 // (a request for another anchor, another anchor's ack, a header error, ...) instead of dropping to STDBY_RC. The datasheet advises it for the
 // slave (13.5.1 step 11). Note RX_CONTINUOUS_PARAMS above has count 0x0000, which is the single-shot mode, despite its name.
 static constexpr uint8_t RANGING_SLAVE_RX_PARAMS[3] = {SX1280_VALUES::PERIOD_BASE_1_MS, 0xFF, 0xFF};
+
+// SetRx payload "stay in RX until told otherwise" (count 0xFFFF): the beacon's SynAck collect, so no frame ends the RX and no re-arm gap can
+// lose an ack from a later slot
+static constexpr uint8_t RX_UNTIL_STOPPED_PARAMS[3] = {SX1280_VALUES::PERIOD_BASE_1_MS, 0xFF, 0xFF};
 
 // SetDioIrqParams payload routing only TX_DONE to DIO1 (irqMask + dio1Mask both set, dio2Mask/dio3Mask left 0) --
 // used by the anchor's ack-send so send_ranging_slave_ack() can confirm the ack actually left the antenna

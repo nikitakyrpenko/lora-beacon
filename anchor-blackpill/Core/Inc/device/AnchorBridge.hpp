@@ -3,7 +3,8 @@
 #include <cstdint>
 #include <optional>
 
-#include "AckPacketIn.hpp"
+#include "SynPacket.hpp"
+#include "AckPacket.hpp"
 #include "SX1280Constants.hpp"
 #include "SX1280Device.hpp"
 #include "stm32h5xx_hal_tim.h"
@@ -30,7 +31,7 @@ static constexpr uint8_t NRESET_RECOVER_MAX_RETRIES = 5;
 
 static constexpr uint16_t RADIO_SUCCESS = 0x3FF;
 static constexpr uint16_t RANGING_SUCCESS = 0x7FF;
-static constexpr uint16_t ACK_SUCCESS = 0xF;
+static constexpr uint16_t ACK_SUCCESS = 0x7;
 
 enum class Mode { IDLE, LISTENING, RANGING, ACK_REQUESTED, ACK_IN_PROGRESS, RECOVER };
 
@@ -104,7 +105,10 @@ private:
   // and IRQ routing between exchanges, so only SetRx needs reissuing; protocol-agnostic, not ranging-specific
   bool rearm_rx();
 
-  std::optional<AckPacketIn> get_ack_packet();
+  // length of the last received frame, from GetRxBufferStatus: lets on_listen tell SynPacket / AckPacket / other frames apart before parsing
+  HAL_StatusTypeDef read_rx_length(uint8_t* len_out);
+  std::optional<SynPacket> get_syn_packet();
+  std::optional<AckPacket> get_ack_packet();
 
   HAL_StatusTypeDef get_irq_mask(uint16_t* mask_out);
 

@@ -3,17 +3,17 @@
 #include <array>
 #include <cstdint>
 
-#include "AckPacket.hpp"
+#include "SynAckPacket.hpp"
 #include "ByteOrder.hpp"
 #include "SX1280Constants.hpp"
 
-struct AckPacketIn {
+struct SynPacket {
   uint8_t wake_word[LORA_BEACON_PROTOCOL::WAKE_WORD_LEN];
   uint16_t ranging_window_ms;
 
-  static AckPacketIn parse(const uint8_t* buf)
+  static SynPacket parse(const uint8_t* buf)
   {
-    AckPacketIn ack{};
+    SynPacket ack{};
     ack.wake_word[0] = buf[0];
     ack.wake_word[1] = buf[1];
 

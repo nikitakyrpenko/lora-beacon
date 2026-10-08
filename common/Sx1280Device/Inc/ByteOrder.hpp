@@ -4,7 +4,7 @@
 #include <cstdint>
 
 // MSB-first ("big-endian") byte packing, as used everywhere on the wire in this project: the SX1280 SPI commands, the wake/ack
-// payloads (AckPacket) and the beacon's UART frame (CycleFrame). Header-only and free of HAL types, so it can also be built
+// payloads (SynAckPacket) and the beacon's UART frame (CycleFrame). Header-only and free of HAL types, so it can also be built
 // on a PC. `put_*` writes to out[0..n), `get_*` reads from in[0..n); the caller guarantees the buffer is long enough.
 namespace ByteOrder {
 
